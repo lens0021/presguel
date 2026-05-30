@@ -77,7 +77,23 @@ echo "[5/5] 레지스트리 캐시 갱신 + ibus 재시작"
 # 시스템 캐시(엔진 탐색)와 사용자 캐시(GNOME 패널이 읽음, <setup> 경로 포함) 둘 다 갱신.
 sudo ibus write-cache --system 2>/dev/null || true
 ibus write-cache 2>/dev/null || true
+
+# 데몬을 실제로 재시작해야 새 <setup>/<layout> 이 반영된다. 이 환경(GNOME/Wayland)에선
+# `ibus restart` 가 데몬을 교체하지 못하는 경우가 있어, PID 가 안 바뀌면 데몬의 실제
+# 실행 인자를 그대로 -r(replace) 로 재실행한다.
+dpid_before="$(pgrep -x ibus-daemon | head -1)"
 ibus restart 2>/dev/null || true
+sleep 2
+dpid_after="$(pgrep -x ibus-daemon | head -1)"
+if [[ -n "$dpid_before" && "$dpid_before" == "$dpid_after" ]]; then
+  echo "      ibus restart 가 데몬을 교체하지 못함 → 실행 인자 그대로 replace 재시작"
+  args="$(tr '\0' ' ' < "/proc/$dpid_before/cmdline" 2>/dev/null)"
+  if [[ -n "$args" ]]; then
+    # 첫 토큰은 실행 파일 경로. -r(replace) -d(detach) 보장.
+    setsid $args -r -d </dev/null >/dev/null 2>&1 || true
+    sleep 2
+  fi
+fi
 sleep 2
 if ibus list-engine 2>/dev/null | grep -qi presguel; then
   echo "      OK: 'presguel' 엔진 등록됨."
