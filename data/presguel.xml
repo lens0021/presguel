@@ -27,6 +27,7 @@
       <description>날개셋 설정 호환 한글 입력기</description>
       <rank>50</rank>
       <symbol>가</symbol>
+      <setup>/usr/local/bin/presguel-setup</setup>
     </engine>
   </engines>
 </component>

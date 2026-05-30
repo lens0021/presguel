@@ -76,23 +76,28 @@ fn prop_symbol(prop: &Value<'_>) -> String {
     String::new()
 }
 
-/// 입력 인자를 (라벨, keyval) 목록으로 만든다.
-/// 기본: 각 문자를 그 코드포인트 keyval 로. `--raw a b c`: 토큰을 16/10진 keyval 로.
-fn parse_keys(args: &[String]) -> Vec<(String, u32)> {
+/// 16/10진 정수 파싱.
+fn parse_int(s: &str) -> Option<u32> {
+    s.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok()).or_else(|| s.parse().ok())
+}
+
+/// 입력 인자를 (라벨, keyval, state) 목록으로 만든다.
+/// 기본: 각 문자를 그 코드포인트 keyval(state 0)로.
+/// `--raw <tok>...`: 각 토큰은 `keyval` 또는 `keyval:state`(둘 다 16/10진).
+fn parse_keys(args: &[String]) -> Vec<(String, u32, u32)> {
     if args.first().map(String::as_str) == Some("--raw") {
         args[1..]
             .iter()
             .filter_map(|t| {
-                let kv = t
-                    .strip_prefix("0x")
-                    .and_then(|h| u32::from_str_radix(h, 16).ok())
-                    .or_else(|| t.parse::<u32>().ok())?;
-                Some((format!("0x{kv:04x}"), kv))
+                let (kvs, sts) = t.split_once(':').unwrap_or((t.as_str(), "0"));
+                let kv = parse_int(kvs)?;
+                let st = parse_int(sts)?;
+                Some((format!("0x{kv:04x}:0x{st:x}"), kv, st))
             })
             .collect()
     } else {
         let s = args.first().cloned().unwrap_or_else(|| "kf kfhf".to_string());
-        s.chars().map(|c| (format!("{c:?}"), c as u32)).collect()
+        s.chars().map(|c| (format!("{c:?}"), c as u32, 0u32)).collect()
     }
 }
 
@@ -128,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut preedit = engine.receive_signal("UpdatePreeditText").await?;
     let mut regprop = engine.receive_signal("RegisterProperties").await?;
     let mut updprop = engine.receive_signal("UpdateProperty").await?;
+    let mut fwd = engine.receive_signal("ForwardKeyEvent").await?;
     let commit_log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let clog = commit_log.clone();
     tokio::spawn(async move {
@@ -154,6 +160,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  ← UpdateProperty symbol={:?}", prop_symbol(&v));
                     }
                 }
+                Some(msg) = fwd.next() => {
+                    let body = msg.body();
+                    if let Ok((kv, _kc, st)) = body.deserialize::<(u32, u32, u32)>() {
+                        let ch = char::from_u32(kv).unwrap_or('?');
+                        println!("  ← ForwardKeyEvent keyval=0x{kv:02x} ({ch:?}) state=0x{st:x}");
+                    }
+                }
                 Some(msg) = regprop.next() => {
                     let _ = msg; // 등록 신호는 도착만 확인
                     println!("  ← RegisterProperties");
@@ -165,9 +178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _: () = engine.call("FocusIn", &()).await.unwrap_or(());
 
-    for (label, keyval) in &keys {
-        println!("→ key {label} (0x{keyval:02x})");
-        let handled: bool = engine.call("ProcessKeyEvent", &(*keyval, 0u32, 0u32)).await?;
+    for (label, keyval, state) in &keys {
+        println!("→ key {label}");
+        let handled: bool = engine.call("ProcessKeyEvent", &(*keyval, 0u32, *state)).await?;
         println!("  handled={handled}");
         tokio::time::sleep(Duration::from_millis(60)).await;
     }

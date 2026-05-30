@@ -8,6 +8,7 @@ mod engine;
 mod factory;
 mod ibus_property;
 mod ibus_text;
+mod settings;
 
 use std::path::PathBuf;
 

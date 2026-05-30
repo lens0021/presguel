@@ -13,9 +13,11 @@ use zbus::zvariant::Value;
 
 use crate::ibus_property::{make_input_mode_property, make_prop_list};
 use crate::ibus_text::{make_ibus_text, make_preedit_text};
+use crate::settings::Settings;
 
 // 수식어/키 마스크 (research/03 §4, 실측).
 const RELEASE_MASK: u32 = 1 << 30;
+const SHIFT_MASK: u32 = 1 << 0;
 const LOCK_MASK: u32 = 1 << 1; // Caps Lock
 const CONTROL_MASK: u32 = 1 << 2;
 const MOD1_MASK: u32 = 1 << 3; // Alt
@@ -91,6 +93,15 @@ pub struct IBusEngine {
     /// IME_SWITCH 키심 → 전환 대상 항목을 정하는 식. 식의 변수 `A` = 현재 항목 인덱스.
     /// 예: `!A` 는 0↔1 토글(0이면 1, 아니면 0). 설정 ShortcutTable 의 value 를 그대로 평가.
     ime_switch: HashMap<u32, Expr>,
+    /// 간단 모드 여부(사용자 설정). 켜면 아래 두 항목만 쓰고 단축키를 영문 배치로 리매핑.
+    simple: bool,
+    /// 간단 모드에서 쓸 한글 항목 인덱스.
+    hangul_idx: usize,
+    /// 간단 모드에서 쓸 영문 배치 항목 인덱스(단축키 변환 기준).
+    latin_idx: usize,
+    /// 단축키 조합을 변환할 영문 배치 KeyTable(간단 모드에서만 Some). 입력 ASCII →
+    /// 영문 배치 글자. XKB 가 us 라 입력 keyval 은 QWERTY 위치, 이 표가 그걸 드보락 등으로 바꾼다.
+    shortcut_layout: Option<HashMap<u32, Expr>>,
 }
 
 impl IBusEngine {
@@ -114,7 +125,7 @@ impl IBusEngine {
         if entries.is_empty() {
             entries.push(Mode::Latin { keys: HashMap::new() });
         }
-        let current = config.default_entry.min(entries.len() - 1);
+        let last = entries.len() - 1;
 
         // usage=IME_SWITCH 단축글쇠: value 식(예 "!A")을 키심에 매핑.
         let mut ime_switch: HashMap<u32, Expr> = HashMap::new();
@@ -132,7 +143,61 @@ impl IBusEngine {
             .entry(KEY_HANGUL)
             .or_insert_with(|| Expr::parse("!A").expect("valid default switch expr"));
 
-        Self { entries, current, ime_switch }
+        // 사용자 설정(간단 모드) 반영.
+        let st = Settings::load();
+        let simple = st.simple_mode;
+        let hangul_idx = st.hangul_entry.min(last);
+        let latin_idx = st.latin_entry.min(last);
+        // 간단 모드에서 단축키 변환에 쓸 영문 배치 KeyTable.
+        let shortcut_layout = if simple {
+            match &entries[latin_idx] {
+                Mode::Latin { keys } => Some(keys.clone()),
+                // 영문 항목이 한글 조합이면 단축키 변환은 비활성(드물게).
+                Mode::Hangul(_) => None,
+            }
+        } else {
+            None
+        };
+        let current = if simple { hangul_idx } else { config.default_entry.min(last) };
+
+        Self { entries, current, ime_switch, simple, hangul_idx, latin_idx, shortcut_layout }
+    }
+
+    /// IME_SWITCH 키를 눌렀을 때 전환할 대상 항목 인덱스.
+    /// - 간단 모드: 한글 항목 ↔ 영문 항목만 오간다(설정에서 고른 둘).
+    /// - 전체 모드: ShortcutTable value 식(예 `!A`, A=현재 항목)을 평가. `!A`→0이면 1, 아니면 0.
+    fn switch_target(&self, keyval: u32) -> usize {
+        if self.simple {
+            return if self.current == self.hangul_idx { self.latin_idx } else { self.hangul_idx };
+        }
+        let len = self.entries.len() as i64;
+        self.ime_switch
+            .get(&keyval)
+            .and_then(|e| e.eval(&Ctx { a: self.current as i64, ..Default::default() }).ok())
+            .and_then(|v| match v {
+                ExprValue::Int(t) => Some(t),
+                _ => None,
+            })
+            .map(|t| t.clamp(0, len - 1) as usize)
+            .unwrap_or(self.current)
+    }
+
+    /// 단축키(Ctrl/Alt/Super+키) 조합을 영문 배치로 변환한 keysym 을 돌려준다.
+    /// 간단 모드에서만 동작. 변환 결과가 입력과 같으면 None(그대로 응용에 넘김).
+    fn remap_shortcut(&self, keyval: u32, state: u32) -> Option<u32> {
+        let keys = self.shortcut_layout.as_ref()?;
+        if !(0x20..=0x7e).contains(&keyval) {
+            return None;
+        }
+        let expr = keys.get(&keyval)?;
+        let shift = (state & SHIFT_MASK != 0) as i64;
+        match expr.eval(&Ctx { p: shift, ..Default::default() }) {
+            Ok(ExprValue::Int(n)) => {
+                let m = u32::try_from(n).ok()?;
+                (m != keyval).then_some(m)
+            }
+            _ => None,
+        }
     }
 
     fn cur(&self) -> &Mode {
@@ -213,7 +278,7 @@ impl IBusEngine {
         &mut self,
         #[zbus(signal_emitter)] se: SignalEmitter<'_>,
         keyval: u32,
-        _keycode: u32,
+        keycode: u32,
         state: u32,
     ) -> fdo::Result<bool> {
         let class = self.classify(keyval, state);
@@ -223,19 +288,7 @@ impl IBusEngine {
             // value 식(예 "!A")을 A=현재 항목으로 평가해 대상 항목을 얻는다. `!A` → 0이면 1, 아니면 0.
             KeyClass::ImeSwitch => {
                 if !release {
-                    let len = self.entries.len() as i64;
-                    let target = self
-                        .ime_switch
-                        .get(&keyval)
-                        .and_then(|e| {
-                            e.eval(&Ctx { a: self.current as i64, ..Default::default() }).ok()
-                        })
-                        .and_then(|v| match v {
-                            ExprValue::Int(t) => Some(t),
-                            _ => None,
-                        })
-                        .map(|t| t.clamp(0, len - 1) as usize)
-                        .unwrap_or(self.current);
+                    let target = self.switch_target(keyval);
                     if target != self.current {
                         self.flush_current(&se).await;
                         self.current = target;
@@ -247,8 +300,15 @@ impl IBusEngine {
             // 뗌·수식어 키 자체: 조합에 영향 없이 통과.
             KeyClass::Release | KeyClass::Modifier => Ok(false),
             // Ctrl/Alt/Super/Meta 조합(단축키): 조합 확정 후 응용에 넘김.
+            // 간단 모드면 영문 배치로 keysym 을 변환해 ForwardKeyEvent(예: QWERTY Alt+P → 드보락).
             KeyClass::ShortcutCombo => {
                 self.flush_current(&se).await;
+                if !release {
+                    if let Some(remapped) = self.remap_shortcut(keyval, state) {
+                        let _ = Self::forward_key_event(&se, remapped, keycode, state).await;
+                        return Ok(true);
+                    }
+                }
                 Ok(false)
             }
             // 나머지는 현재 항목의 방식에 따라 처리.
@@ -406,6 +466,22 @@ mod tests {
     fn engine() -> IBusEngine {
         let cfg = Config::parse(MINI).unwrap();
         IBusEngine::new(&cfg)
+    }
+
+    #[test]
+    fn shortcut_remap_via_latin_layout() {
+        // 영문 배치(드보락 흉내): QWERTY 'p'(0x70) → 'l'(0x6c), Shift 면 'L'(0x4c).
+        let mut e = engine();
+        let mut keys = HashMap::new();
+        keys.insert(0x70u32, Expr::parse("108^(P&1)<<5").unwrap());
+        e.shortcut_layout = Some(keys);
+
+        assert_eq!(e.remap_shortcut(0x70, 0), Some(0x6c)); // Alt+p → Alt+l
+        assert_eq!(e.remap_shortcut(0x70, SHIFT_MASK), Some(0x4c)); // Alt+Shift+p → L
+        assert_eq!(e.remap_shortcut(0x71, 0), None); // 매핑 없는 키
+        // 영문 배치 미설정(전체 모드)이면 변환 안 함.
+        e.shortcut_layout = None;
+        assert_eq!(e.remap_shortcut(0x70, 0), None);
     }
 
     #[test]
