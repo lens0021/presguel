@@ -3,7 +3,7 @@
 //! 키 이벤트(method)를 받아 조합하고, 결과를 CommitText / UpdatePreeditText
 //! (signal)로 데몬에 돌려준다. 참고: `research/03-ibus-zbus.md` §2,§4.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use presguel_core::expr::{Ctx, Expr, Value as ExprValue};
 use presguel_core::{Config, Engine as Core};
@@ -62,8 +62,8 @@ enum KeyClass {
 
 /// 한 입력 항목의 처리 방식.
 enum Mode {
-    /// 한글 조합 항목(KeyTable 에 H3| 낱자가 있는 항목).
-    Hangul(Core),
+    /// 한글 조합 항목(KeyTable 에 H3| 낱자가 있는 항목). Core 가 커서 박싱.
+    Hangul(Box<Core>),
     /// 로마자/직접 항목: KeyTable 로 문자만 내보내고(드보락 등), 키표가 없으면 패스스루.
     Latin { keys: HashMap<u32, Expr> },
 }
@@ -88,8 +88,9 @@ pub struct IBusEngine {
     entries: Vec<Mode>,
     /// 현재 활성 입력 항목 인덱스.
     current: usize,
-    /// IME_SWITCH 를 일으키는 키심들(설정 ShortcutTable 에서 해석).
-    ime_switch: HashSet<u32>,
+    /// IME_SWITCH 키심 → 전환 대상 항목을 정하는 식. 식의 변수 `A` = 현재 항목 인덱스.
+    /// 예: `!A` 는 0↔1 토글(0이면 1, 아니면 0). 설정 ShortcutTable 의 value 를 그대로 평가.
+    ime_switch: HashMap<u32, Expr>,
 }
 
 impl IBusEngine {
@@ -102,7 +103,7 @@ impl IBusEngine {
                 Ok(layout) => {
                     let is_hangul = layout.keys.values().any(|e| e.contains_unit());
                     if is_hangul {
-                        entries.push(Mode::Hangul(Core::new(layout)));
+                        entries.push(Mode::Hangul(Box::new(Core::new(layout))));
                     } else {
                         entries.push(Mode::Latin { keys: layout.keys });
                     }
@@ -115,14 +116,22 @@ impl IBusEngine {
         }
         let current = config.default_entry.min(entries.len() - 1);
 
-        // usage=IME_SWITCH 단축글쇠의 키심. 한/영 키(0xff31)는 항상 포함.
-        let mut ime_switch: HashSet<u32> = HashSet::new();
-        ime_switch.insert(KEY_HANGUL);
+        // usage=IME_SWITCH 단축글쇠: value 식(예 "!A")을 키심에 매핑.
+        let mut ime_switch: HashMap<u32, Expr> = HashMap::new();
         for sc in &config.editor.shortcuts {
             if sc.usage == "IME_SWITCH" {
-                ime_switch.extend(vk_to_keysyms(&sc.key).iter().copied());
+                if let Ok(expr) = Expr::parse(&sc.value) {
+                    for &ks in vk_to_keysyms(&sc.key) {
+                        ime_switch.insert(ks, expr.clone());
+                    }
+                }
             }
         }
+        // 한/영 키(0xff31)는 설정에 IME_SWITCH 가 없어도 기본 !A(0↔1) 로 동작.
+        ime_switch
+            .entry(KEY_HANGUL)
+            .or_insert_with(|| Expr::parse("!A").expect("valid default switch expr"));
+
         Self { entries, current, ime_switch }
     }
 
@@ -176,7 +185,7 @@ impl IBusEngine {
     /// 키 이벤트를 분류한다(순수 함수). `process_key_event` 가 이 결과로 분기한다.
     /// IME_SWITCH 는 release/수식어보다 먼저 본다 — CapsLock 은 수식어 키심이기도 하므로.
     fn classify(&self, keyval: u32, state: u32) -> KeyClass {
-        if self.ime_switch.contains(&keyval) {
+        if self.ime_switch.contains_key(&keyval) {
             return KeyClass::ImeSwitch;
         }
         if state & RELEASE_MASK != 0 {
@@ -210,12 +219,28 @@ impl IBusEngine {
         let class = self.classify(keyval, state);
         let release = state & RELEASE_MASK != 0;
         match class {
-            // IME_SWITCH(한/영·CapsLock 등): 눌림/뗌 모두 소비, 눌림에서만 다음 항목으로 순환.
+            // IME_SWITCH(한/영·CapsLock 등): 눌림/뗌 모두 소비, 눌림에서 전환식을 평가.
+            // value 식(예 "!A")을 A=현재 항목으로 평가해 대상 항목을 얻는다. `!A` → 0이면 1, 아니면 0.
             KeyClass::ImeSwitch => {
                 if !release {
-                    self.flush_current(&se).await;
-                    self.current = (self.current + 1) % self.entries.len();
-                    self.update_indicator(&se).await; // 패널 심볼(가N/AN) 갱신
+                    let len = self.entries.len() as i64;
+                    let target = self
+                        .ime_switch
+                        .get(&keyval)
+                        .and_then(|e| {
+                            e.eval(&Ctx { a: self.current as i64, ..Default::default() }).ok()
+                        })
+                        .and_then(|v| match v {
+                            ExprValue::Int(t) => Some(t),
+                            _ => None,
+                        })
+                        .map(|t| t.clamp(0, len - 1) as usize)
+                        .unwrap_or(self.current);
+                    if target != self.current {
+                        self.flush_current(&se).await;
+                        self.current = target;
+                        self.update_indicator(&se).await; // 패널 심볼(가N/AN) 갱신
+                    }
                 }
                 Ok(true)
             }
@@ -387,10 +412,25 @@ mod tests {
     fn capslock_in_switch_set() {
         let e = engine();
         // 설정의 VK_CAPITAL → Caps_Lock(0xffe5), VK_HANGUL → 0xff31
-        assert!(e.ime_switch.contains(&0xffe5));
-        assert!(e.ime_switch.contains(&0xff31));
+        assert!(e.ime_switch.contains_key(&0xffe5));
+        assert!(e.ime_switch.contains_key(&0xff31));
         // VK_HANJA 는 KEYCHAR 라 전환 집합에 없어야 한다.
-        assert!(!e.ime_switch.contains(&0xff34));
+        assert!(!e.ime_switch.contains_key(&0xff34));
+    }
+
+    #[test]
+    fn switch_expr_is_not_a_toggle() {
+        use presguel_core::expr::{Ctx, Value as EV};
+        let e = engine();
+        // ShortcutTable value="!A" → A=현재 항목. 0이면 1, 아니면 0.
+        let expr = e.ime_switch.get(&0xffe5).expect("capslock switch expr");
+        let f = |cur: i64| match expr.eval(&Ctx { a: cur, ..Default::default() }).unwrap() {
+            EV::Int(t) => t,
+            other => panic!("expected int, got {other:?}"),
+        };
+        assert_eq!(f(0), 1);
+        assert_eq!(f(1), 0);
+        assert_eq!(f(2), 0);
     }
 
     #[test]
