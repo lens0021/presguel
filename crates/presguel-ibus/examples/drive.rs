@@ -58,6 +58,24 @@ fn ibus_text_string(v: &Value<'_>) -> String {
     String::new()
 }
 
+/// 변수(v) 래핑을 한 겹 벗긴다.
+fn unwrap_variant<'a>(v: &'a Value<'a>) -> &'a Value<'a> {
+    match v {
+        Value::Value(b) => b.as_ref(),
+        other => other,
+    }
+}
+
+/// IBusProperty variant 에서 symbol(마지막 필드, IBusText)의 글자를 뽑는다.
+fn prop_symbol(prop: &Value<'_>) -> String {
+    if let Value::Structure(s) = prop {
+        if let Some(field) = s.fields().get(11) {
+            return ibus_text_string(unwrap_variant(field));
+        }
+    }
+    String::new()
+}
+
 /// 입력 인자를 (라벨, keyval) 목록으로 만든다.
 /// 기본: 각 문자를 그 코드포인트 keyval 로. `--raw a b c`: 토큰을 16/10진 keyval 로.
 fn parse_keys(args: &[String]) -> Vec<(String, u32)> {
@@ -108,6 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 신호 구독 → 백그라운드로 출력.
     let mut commit = engine.receive_signal("CommitText").await?;
     let mut preedit = engine.receive_signal("UpdatePreeditText").await?;
+    let mut regprop = engine.receive_signal("RegisterProperties").await?;
+    let mut updprop = engine.receive_signal("UpdateProperty").await?;
     let commit_log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let clog = commit_log.clone();
     tokio::spawn(async move {
@@ -127,6 +147,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok((v, _c, vis, _m)) = body.deserialize::<(Value, u32, bool, u32)>() {
                         println!("  ← UpdatePreeditText {:?} (visible={vis})", ibus_text_string(&v));
                     }
+                }
+                Some(msg) = updprop.next() => {
+                    let body = msg.body();
+                    if let Ok((v,)) = body.deserialize::<(Value,)>() {
+                        println!("  ← UpdateProperty symbol={:?}", prop_symbol(&v));
+                    }
+                }
+                Some(msg) = regprop.next() => {
+                    let _ = msg; // 등록 신호는 도착만 확인
+                    println!("  ← RegisterProperties");
                 }
                 else => break,
             }

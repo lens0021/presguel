@@ -3,10 +3,10 @@
 //! 키 이벤트(method)를 받아 조합하고, 결과를 CommitText / UpdatePreeditText
 //! (signal)로 데몬에 돌려준다. 참고: `research/03-ibus-zbus.md` §2,§4.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use presguel_core::Engine as Core;
-use presguel_core::Layout;
+use presguel_core::expr::{Ctx, Expr, Value as ExprValue};
+use presguel_core::{Config, Engine as Core};
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 use zbus::zvariant::Value;
@@ -49,7 +49,7 @@ fn vk_to_keysyms(vk: &str) -> &'static [u32] {
 }
 
 /// 키 분류(순수 함수 결과). 라우팅 로직을 D-Bus 비동기와 분리해 단위 테스트한다.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyClass {
     Release,
     ImeSwitch,
@@ -60,27 +60,74 @@ enum KeyClass {
     FunctionKey,
 }
 
-/// IBus 엔진 인스턴스 하나.
+/// 한 입력 항목의 처리 방식.
+enum Mode {
+    /// 한글 조합 항목(KeyTable 에 H3| 낱자가 있는 항목).
+    Hangul(Core),
+    /// 로마자/직접 항목: KeyTable 로 문자만 내보내고(드보락 등), 키표가 없으면 패스스루.
+    Latin { keys: HashMap<u32, Expr> },
+}
+
+impl Mode {
+    fn is_hangul(&self) -> bool {
+        matches!(self, Mode::Hangul(_))
+    }
+    /// 패널 심볼 접두(날개셋 방식: 한글=가, 로마자/직접=A).
+    fn symbol_prefix(&self) -> &'static str {
+        if self.is_hangul() {
+            "가"
+        } else {
+            "A"
+        }
+    }
+}
+
+/// IBus 엔진 인스턴스 하나. 설정의 모든 입력 항목을 담고 IME_SWITCH 로 순환 전환한다.
+/// 패널 표시기는 날개셋처럼 `접두+항목번호`(예: `가0`, `A1`)로 보인다.
 pub struct IBusEngine {
-    core: Core,
-    /// 한글 조합 모드(true) / 영문 패스스루(false).
-    hangul: bool,
-    /// 한/영 전환(IME_SWITCH)을 일으키는 키심들(설정 ShortcutTable 에서 해석).
+    entries: Vec<Mode>,
+    /// 현재 활성 입력 항목 인덱스.
+    current: usize,
+    /// IME_SWITCH 를 일으키는 키심들(설정 ShortcutTable 에서 해석).
     ime_switch: HashSet<u32>,
 }
 
 impl IBusEngine {
-    pub fn new(layout: Layout) -> Self {
-        // 설정의 단축글쇠 중 usage=IME_SWITCH 인 것의 키심을 모은다. 한/영 키(0xff31)는
-        // 설정에 없어도 항상 포함한다.
+    pub fn new(config: &Config) -> Self {
+        // 모든 입력 항목을 컴파일한다. KeyTable 에 H3| 낱자가 있으면 한글 조합 항목,
+        // 아니면 로마자/직접(문자만 내보냄) 항목으로 본다.
+        let mut entries = Vec::new();
+        for i in 0..config.entries.len() {
+            match config.compile(i) {
+                Ok(layout) => {
+                    let is_hangul = layout.keys.values().any(|e| e.contains_unit());
+                    if is_hangul {
+                        entries.push(Mode::Hangul(Core::new(layout)));
+                    } else {
+                        entries.push(Mode::Latin { keys: layout.keys });
+                    }
+                }
+                Err(_) => entries.push(Mode::Latin { keys: HashMap::new() }),
+            }
+        }
+        if entries.is_empty() {
+            entries.push(Mode::Latin { keys: HashMap::new() });
+        }
+        let current = config.default_entry.min(entries.len() - 1);
+
+        // usage=IME_SWITCH 단축글쇠의 키심. 한/영 키(0xff31)는 항상 포함.
         let mut ime_switch: HashSet<u32> = HashSet::new();
         ime_switch.insert(KEY_HANGUL);
-        for sc in &layout.shortcuts {
+        for sc in &config.editor.shortcuts {
             if sc.usage == "IME_SWITCH" {
                 ime_switch.extend(vk_to_keysyms(&sc.key).iter().copied());
             }
         }
-        Self { core: Core::new(layout), hangul: true, ime_switch }
+        Self { entries, current, ime_switch }
+    }
+
+    fn cur(&self) -> &Mode {
+        &self.entries[self.current]
     }
 
     /// 확정 문자열과 preedit 를 신호로 내보낸다.
@@ -99,32 +146,31 @@ impl IBusEngine {
         .await;
     }
 
-    /// 현재 조합을 확정해 내보내고 비운다.
-    async fn flush_commit(&mut self, se: &SignalEmitter<'_>) {
-        let commit = self.core.flush();
-        if !commit.is_empty() {
-            Self::emit(se, &commit, "").await;
+    /// 현재 항목이 한글 조합이면 조합을 확정해 내보낸다.
+    async fn flush_current(&mut self, se: &SignalEmitter<'_>) {
+        let i = self.current;
+        if let Mode::Hangul(core) = &mut self.entries[i] {
+            let commit = core.flush();
+            if !commit.is_empty() {
+                Self::emit(se, &commit, "").await;
+            }
         }
     }
 
-    /// 패널에 표시할 현재 모드 심볼. 날개셋(Windows) 방식: 한글이면 "가", 영문이면 "A".
-    /// (ibus-hangul 의 "한"과 달리 날개셋은 음절자 "가"·라틴 "A" 를 쓴다.)
-    fn mode_symbol(&self) -> &'static str {
-        if self.hangul {
-            "가"
-        } else {
-            "A"
-        }
+    /// 패널 심볼: 날개셋 방식의 `접두 + 항목번호`. 한글=가, 로마자/직접=A. 예: "가0", "A1".
+    /// (항목을 추가하면 번호가 함께 늘어난다.)
+    fn mode_symbol(&self) -> String {
+        format!("{}{}", self.cur().symbol_prefix(), self.current)
     }
 
     /// 입력 모드 속성을 등록(패널이 심볼을 알도록). focus_in/enable 시 호출.
     async fn register_props(&self, se: &SignalEmitter<'_>) {
-        let _ = Self::register_properties(se, make_prop_list(self.mode_symbol(), "Presguel")).await;
+        let _ = Self::register_properties(se, make_prop_list(&self.mode_symbol(), "Presguel")).await;
     }
 
     /// 모드가 바뀌었을 때 패널 심볼을 갱신.
     async fn update_indicator(&self, se: &SignalEmitter<'_>) {
-        let _ = Self::update_property(se, make_input_mode_property(self.mode_symbol(), "Presguel")).await;
+        let _ = Self::update_property(se, make_input_mode_property(&self.mode_symbol(), "Presguel")).await;
     }
 
     /// 키 이벤트를 분류한다(순수 함수). `process_key_event` 가 이 결과로 분기한다.
@@ -161,14 +207,15 @@ impl IBusEngine {
         _keycode: u32,
         state: u32,
     ) -> fdo::Result<bool> {
+        let class = self.classify(keyval, state);
         let release = state & RELEASE_MASK != 0;
-        match self.classify(keyval, state) {
-            // IME_SWITCH(한/영·CapsLock 등): 눌림/뗌 모두 소비, 눌림에서만 토글.
+        match class {
+            // IME_SWITCH(한/영·CapsLock 등): 눌림/뗌 모두 소비, 눌림에서만 다음 항목으로 순환.
             KeyClass::ImeSwitch => {
                 if !release {
-                    self.flush_commit(&se).await;
-                    self.hangul = !self.hangul;
-                    self.update_indicator(&se).await; // 패널 심볼 한↔EN 갱신
+                    self.flush_current(&se).await;
+                    self.current = (self.current + 1) % self.entries.len();
+                    self.update_indicator(&se).await; // 패널 심볼(가N/AN) 갱신
                 }
                 Ok(true)
             }
@@ -176,31 +223,54 @@ impl IBusEngine {
             KeyClass::Release | KeyClass::Modifier => Ok(false),
             // Ctrl/Alt/Super/Meta 조합(단축키): 조합 확정 후 응용에 넘김.
             KeyClass::ShortcutCombo => {
-                self.flush_commit(&se).await;
+                self.flush_current(&se).await;
                 Ok(false)
             }
-            // 영문 패스스루 모드면 아래 한글 처리들을 모두 통과.
-            _ if !self.hangul => Ok(false),
-            // 백스페이스: 조합 중이면 낱자 단위로 되돌림, 아니면 응용에 넘김.
-            KeyClass::Backspace => {
-                if self.core.is_empty() {
-                    return Ok(false);
-                }
-                let out = self.core.backspace();
-                Self::emit(&se, &out.commit, &out.preedit).await;
-                Ok(out.consumed)
-            }
-            // 인쇄 가능 ASCII(+ space): KeyTable 로 처리.
-            KeyClass::Printable(ascii) => {
+            // 나머지는 현재 항목의 방식에 따라 처리.
+            KeyClass::Backspace | KeyClass::Printable(_) | KeyClass::FunctionKey => {
                 let caps = state & LOCK_MASK != 0;
-                let out = self.core.press(ascii, caps);
-                Self::emit(&se, &out.commit, &out.preedit).await;
-                Ok(out.consumed)
-            }
-            // 그 밖의 기능키(Enter/Esc/화살표 등): 조합 확정 후 통과.
-            KeyClass::FunctionKey => {
-                self.flush_commit(&se).await;
-                Ok(false)
+                let i = self.current;
+                match &mut self.entries[i] {
+                    // 한글 조합 항목.
+                    Mode::Hangul(core) => match class {
+                        KeyClass::Backspace => {
+                            if core.is_empty() {
+                                return Ok(false);
+                            }
+                            let out = core.backspace();
+                            Self::emit(&se, &out.commit, &out.preedit).await;
+                            Ok(out.consumed)
+                        }
+                        KeyClass::Printable(ascii) => {
+                            let out = core.press(ascii, caps);
+                            Self::emit(&se, &out.commit, &out.preedit).await;
+                            Ok(out.consumed)
+                        }
+                        _ => {
+                            // 기능키: 조합 확정 후 통과.
+                            let commit = core.flush();
+                            if !commit.is_empty() {
+                                Self::emit(&se, &commit, "").await;
+                            }
+                            Ok(false)
+                        }
+                    },
+                    // 로마자/직접 항목: KeyTable 로 문자만 내보내고, 매핑 없으면 패스스루.
+                    Mode::Latin { keys } => {
+                        if let KeyClass::Printable(ascii) = class {
+                            if let Some(expr) = keys.get(&(ascii as u32)) {
+                                let ctx = Ctx { p: caps as i64, ..Default::default() };
+                                if let Ok(ExprValue::Int(n)) = expr.eval(&ctx) {
+                                    if let Some(ch) = u32::try_from(n).ok().and_then(char::from_u32) {
+                                        Self::emit(&se, &ch.to_string(), "").await;
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(false) // 매핑 없음 / 백스페이스 / 기능키 → 응용에 넘김
+                    }
+                }
             }
         }
     }
@@ -211,12 +281,15 @@ impl IBusEngine {
     }
 
     async fn focus_out(&mut self, #[zbus(signal_emitter)] se: SignalEmitter<'_>) -> fdo::Result<()> {
-        self.flush_commit(&se).await;
+        self.flush_current(&se).await;
         Ok(())
     }
 
     async fn reset(&mut self, #[zbus(signal_emitter)] se: SignalEmitter<'_>) -> fdo::Result<()> {
-        self.core.reset();
+        let i = self.current;
+        if let Mode::Hangul(core) = &mut self.entries[i] {
+            core.reset();
+        }
         Self::emit(&se, "", "").await;
         Ok(())
     }
@@ -227,7 +300,7 @@ impl IBusEngine {
     }
 
     async fn disable(&mut self, #[zbus(signal_emitter)] se: SignalEmitter<'_>) -> fdo::Result<()> {
-        self.flush_commit(&se).await;
+        self.flush_current(&se).await;
         Ok(())
     }
 
@@ -307,7 +380,7 @@ mod tests {
 
     fn engine() -> IBusEngine {
         let cfg = Config::parse(MINI).unwrap();
-        IBusEngine::new(cfg.compile(0).unwrap())
+        IBusEngine::new(&cfg)
     }
 
     #[test]

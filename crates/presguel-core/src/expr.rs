@@ -133,6 +133,18 @@ impl Expr {
         Ok(e)
     }
 
+    /// 이 식(하위 포함)이 H3| 한글 낱자(Unit)를 만들 수 있는지. 한글 조합 항목과
+    /// 로마자/패스스루 항목을 구별하는 데 쓴다(한글 항목이면 KeyTable 에 H3| 가 있음).
+    pub fn contains_unit(&self) -> bool {
+        match self {
+            Expr::Unit(_) => true,
+            Expr::Int(_) | Expr::Var(_) | Expr::Command(_) => false,
+            Expr::Unary(_, x) => x.contains_unit(),
+            Expr::Binary(_, a, b) => a.contains_unit() || b.contains_unit(),
+            Expr::Ternary(c, t, f) => c.contains_unit() || t.contains_unit() || f.contains_unit(),
+        }
+    }
+
     /// 문맥으로 식을 평가한다.
     pub fn eval(&self, ctx: &Ctx) -> Result<Value, ExprError> {
         Ok(match self {
@@ -542,6 +554,17 @@ mod tests {
         assert_eq!(ev(src, &Ctx { a: 500, ..Default::default() }), Value::Int(2));
         // 아무 낱자도 아님 → -2
         assert_eq!(ev(src, &Ctx::default()), Value::Int(-2));
+    }
+
+    #[test]
+    fn contains_unit_detects_hangul_keys() {
+        // 한글 키: H3| 포함 → true
+        assert!(Expr::parse("H3|_GG").unwrap().contains_unit());
+        assert!(Expr::parse("T ? H3|_J : 0x23").unwrap().contains_unit());
+        // 로마자/리터럴 키: Unit 없음 → false
+        assert!(!Expr::parse("119^(P&1)<<5").unwrap().contains_unit());
+        assert!(!Expr::parse("0x5B").unwrap().contains_unit());
+        assert!(!Expr::parse("C0|0x82").unwrap().contains_unit());
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! `org.freedesktop.IBus.Factory` 구현. 데몬의 `CreateEngine` 요청마다 엔진 객체를
 //! 만들어 객체 서버에 등록하고 그 경로를 돌려준다.
 
-use presguel_core::Layout;
+use std::sync::Arc;
+
+use presguel_core::Config;
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{fdo, interface, Connection};
 
@@ -10,13 +12,13 @@ use crate::engine::IBusEngine;
 /// 엔진을 찍어내는 팩토리.
 pub struct Factory {
     conn: Connection,
-    layout: Layout,
+    config: Arc<Config>,
     next: u32,
 }
 
 impl Factory {
-    pub fn new(conn: Connection, layout: Layout) -> Self {
-        Self { conn, layout, next: 0 }
+    pub fn new(conn: Connection, config: Arc<Config>) -> Self {
+        Self { conn, config, next: 0 }
     }
 }
 
@@ -28,7 +30,7 @@ impl Factory {
         }
         self.next += 1;
         let path = format!("/org/freedesktop/IBus/Engine/{}", self.next);
-        let engine = IBusEngine::new(self.layout.clone());
+        let engine = IBusEngine::new(&self.config);
         self.conn
             .object_server()
             .at(path.as_str(), engine)

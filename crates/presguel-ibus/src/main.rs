@@ -48,14 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             path.display()
         )
     })?;
-    let cfg = Config::parse(&xml)?;
-    let entry = cfg.first_hangul_entry().unwrap_or(cfg.default_entry);
-    let layout = cfg.compile(entry)?;
+    let cfg = std::sync::Arc::new(Config::parse(&xml)?);
     eprintln!(
-        "presguel-ibus: 설정 {} (항목 {}: {}) 로드",
+        "presguel-ibus: 설정 {} ({} 항목, 기본 {}) 로드",
         path.display(),
-        entry,
-        layout.name
+        cfg.entries.len(),
+        cfg.default_entry
     );
 
     // IBus 사설 버스에 연결.
@@ -64,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = conn.unique_name(); // Hello 핸드셰이크 완료 확인
 
     // 팩토리 등록 + 이름 요청.
-    let factory = Factory::new(conn.clone(), layout);
+    let factory = Factory::new(conn.clone(), cfg);
     conn.object_server().at(FACTORY_PATH, factory).await?;
     conn.request_name(BUS_NAME).await?;
     eprintln!("presguel-ibus: {BUS_NAME} 등록 완료, 대기 중");
