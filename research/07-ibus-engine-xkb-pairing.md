@@ -277,3 +277,61 @@ presguel-setup(GTK 설정창)에 "베이스 키보드 레이아웃" 드롭다운
   설정창의 "단축키 키보드 배열" 드롭다운/적용 버튼. (§6 레시피는 이 방식으로 대체됨.)
 - 실기 검증: 17개 엔진 등록 확인, 데몬이 각 엔진의 layout/variant 를 올바로 보고
   (`presguel:us:colemak`→variant=colemak 등; 데몬 완전 재시작 후 정확).
+
+> ⚠️ **정정(§10):** 아래 §10 에서 실증한 결과, `<layout_variant>` 방식은 gnome-shell 49 버그로
+> **실제로 동작하지 않았다.** variant 를 `<layout>us+dvorak</layout>` 처럼 layout 필드에 합쳐야 한다.
+> 위 "데몬이 variant 를 올바로 보고" 는 사실이나(데몬 레벨은 정상), gnome-shell 이 그 variant 를
+> 안 읽는 게 문제였다. §2 의 "INFER (확신 매우 높음)" 도 이 지점에서 틀렸다.
+
+---
+
+## 10. 실증: `<layout_variant>` 는 gnome-shell 49 에서 무시된다 (GObject 인트로스펙션으로 확정)
+
+**증상(사용자 보고, 2026-05-31):** 컴포넌트 XML 17엔진·캐시·데몬 desc 가 전부 정확한데도
+(재로그인까지 했는데) `Presguel (Dvorak)` 활성 시 물리 QWERTY-R 이 여전히 `r`. dvorak 안 먹음.
+
+### 10.1 근본 원인 — **FACT (인트로스펙션 직접 확인)**
+gnome-shell `js/ui/status/keyboard.js` 의 `_getXkbId()`(§1.2 인용)는 `engineDesc.variant` 를 읽는다:
+```js
+if (engineDesc.variant && engineDesc.variant.length > 0)
+    return `${engineDesc.layout}+${engineDesc.variant}`;
+else
+    return engineDesc.layout;
+```
+그런데 **`IBus.EngineDesc` 에는 `variant` 라는 GObject 속성이 없다.** 실제 속성은 `layout-variant`다.
+`python3 -c "GObject.list_properties(IBus.EngineDesc)"` 결과(직접 실행):
+```
+[... 'layout', 'layout-option', 'layout-variant', ...]   # 'variant' 없음
+has 'variant' prop?        False
+has 'layout-variant' prop? True
+```
+gjs 로 `engineDesc.variant` 접근 시 **`undefined`** 반환(예외 아님, JS 라 조용히 undefined):
+```
+presguel:us:dvorak:  .variant = undefined,  .layout_variant = "dvorak",  .layout = "us"
+>>> _getXkbId() = "us"           # variant=undefined → else 분기 → layout 만!
+```
+⇒ `<layout_variant>dvorak</layout_variant>` 는 `_getXkbId` 에서 **항상 무시**되고 `xkbId="us"`(QWERTY)로
+귀결. mutter 가 us 키맵을 깐다. 이게 증상의 정확한 원인. (hangul 의 `kr104` 도 같은 이유로 무시되나
+kr 과 거의 같아 아무도 못 느낀 잠복 버그. 이 사실이 §2 의 "hangul kr104 가 동작하므로 variant 가
+반영된다"는 *방증을 무효화*한다 — kr104 는 사실 반영된 적이 없다.)
+
+### 10.2 해결 — variant 를 `<layout>` 에 합치기. **FACT (데몬+gjs 로 실증)**
+`<layout>us+dvorak</layout>` 로 두고 `<layout_variant>` 는 생략한다. 그러면:
+- 데몬 desc: `get_layout()="us+dvorak"`, `get_layout_variant()=""`.
+- `_getXkbId()`: variant 빈 값 → `else` → `engineDesc.layout` = `"us+dvorak"` 그대로 반환.
+- `GnomeDesktop.XkbInfo.get_layout_info("us+dvorak")` → **found=true**, layout=us, variant=dvorak
+  (gjs 직접 확인. `us+colemak`, `us+workman` 등 16개 변형 전부 found). ⇒ `setUserLayouts` 에 등록 →
+  `apply` → `set_keymap_async("us","dvorak")`. 사용자의 잘 되던 `('xkb','us+dvorak')` 소스와 **동일 xkbId**.
+- 검증 명령: `python3 /tmp/presguel_dump_engines.py`(데몬 desc), `gjs /tmp/probe_enginedesc.js`(_getXkbId 재현).
+  수정 후: `presguel:us:dvorak | layout='us+dvorak'`, `_getXkbId()="us+dvorak"`. ✅
+
+### 10.3 적용
+`install.sh` 의 엔진 XML 생성에서 `xkb_layout="${layout}+${variant}"`(variant 있을 때)로 `<layout>` 에
+합쳐 쓰고 `<layout_variant>` 줄을 제거. 재설치 후 데몬/gjs 로 위 값 확인. **재로그인 1회 필요**
+(gnome-shell 이 `InputSource.xkbId` 를 생성 시 1회 캐시 — §1.2). 그 뒤 물리 QWERTY-R → dvorak `p`.
+
+### 10.4 신뢰도
+- **FACT**: `variant` 속성 부재(`list_properties`), `_getXkbId` 가 `us` 반환(gjs), `us+dvorak` 합본이
+  `get_layout_info` found(gjs), 수정 후 데몬 desc=`us+dvorak`·`_getXkbId="us+dvorak"`(실행 확인).
+- **남은 1점(사용자 확인 대기)**: 재로그인 후 실제 타이핑에서 물리 R→`p`. 위 체인이 사용자의 dvorak
+  xkb 소스와 동일 경로·동일 xkbId 로 수렴하므로 동작 확신 매우 높음.

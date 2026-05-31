@@ -89,15 +89,20 @@ for spec in "${engines[@]}"; do
   else
     longname="Presguel (${disp})"
   fi
-  variant_line=""
-  [[ -n "$variant" ]] && variant_line="
-      <layout_variant>${variant}</layout_variant>"
+  # gnome-shell(49) status/keyboard.js 의 _getXkbId 는 EngineDesc 의 `layout-variant`
+  # 가 아니라 *존재하지 않는* `variant` 속성을 읽는다(undefined → else 분기 → layout 만).
+  # 즉 <layout_variant> 는 무시되고 QWERTY 로 떨어진다(검증: GObject 인트로스펙션,
+  # research/07 §10). 그래서 variant 를 <layout> 에 `us+dvorak` 형태로 합쳐 둔다.
+  # _getXkbId 가 그 문자열을 그대로 쓰고 get_layout_info("us+dvorak") 가 found 다
+  # (= 사용자의 ('xkb','us+dvorak') 소스와 동일한 xkbId). <layout_variant> 는 두지 않는다.
+  xkb_layout="$layout"
+  [[ -n "$variant" ]] && xkb_layout="${layout}+${variant}"
   engine_xml+="
     <engine>
       <name>${name}</name>
       <language>ko</language>
       <icon>ibus-hangul</icon>
-      <layout>${layout}</layout>${variant_line}
+      <layout>${xkb_layout}</layout>
       <longname>${longname}</longname>
       <description>Presguel 한글 입력기 (${disp})</description>
       <rank>50</rank>
