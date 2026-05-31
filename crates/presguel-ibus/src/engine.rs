@@ -259,10 +259,15 @@ impl IBusEngine {
         }
     }
 
-    /// 패널 심볼: 날개셋 방식의 `접두 + 항목번호`. 한글=가, 로마자/직접=A. 예: "가0", "A1".
-    /// (항목을 추가하면 번호가 함께 늘어난다.)
+    /// 패널 심볼: 접두(한글=가, 로마자/직접=A)에 항목 번호를 아래첨자로 붙인다(예: "가₀").
+    /// 간단 모드에서는 한글/영문 둘뿐이라 번호 없이 접두만 보인다(예: "가", "A").
     fn mode_symbol(&self) -> String {
-        format!("{}{}", self.cur().symbol_prefix(), self.current)
+        let prefix = self.cur().symbol_prefix();
+        if self.settings.simple_mode {
+            prefix.to_string()
+        } else {
+            format!("{}{}", prefix, subscript_digits(self.current))
+        }
     }
 
     /// 입력 모드 속성을 등록(패널이 심볼을 알도록). focus_in/enable 시 호출.
