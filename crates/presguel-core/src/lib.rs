@@ -11,6 +11,7 @@ pub mod engine;
 pub mod evdev;
 pub mod expr;
 pub mod jamo;
+mod ngs_seq;
 pub mod unit;
 
 #[doc(inline)]

@@ -11,6 +11,7 @@
 use crate::config::Layout;
 use crate::expr::{Ctx, Value};
 use crate::jamo;
+use crate::ngs_seq::ngs_seq;
 use crate::unit::{self, Category, Jamo, Unit};
 
 /// 조합 중인 한 음절. 각 칸은 조합용 자모 코드포인트(겹낱자는 결합된 단일 코드포인트).
@@ -45,14 +46,18 @@ pub struct Engine {
     cur: Syllable,
     /// 마지막 확정 이후 현재 음절에 투입된 단위들(낱자 단위 백스페이스용 재생 이력).
     history: Vec<Unit>,
+    /// 오토마타 현재 상태 id. layout.automata 가 비어 있으면 미사용(기본 휴리스틱).
+    auto_state: i64,
 }
 
 impl Engine {
     pub fn new(layout: Layout) -> Self {
+        let auto_state = layout.automata_start;
         Self {
             layout,
             cur: Syllable::default(),
             history: Vec::new(),
+            auto_state,
         }
     }
 
@@ -136,6 +141,7 @@ impl Engine {
     pub fn flush(&mut self) -> String {
         let s = self.commit_current();
         self.history.clear();
+        self.auto_state = self.layout.automata_start;
         s
     }
 
@@ -143,6 +149,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.cur = Syllable::default();
         self.history.clear();
+        self.auto_state = self.layout.automata_start;
     }
 
     // ── 낱자 투입 ────────────────────────────────────────────────────────────
@@ -234,6 +241,22 @@ impl Engine {
     }
 
     fn feed_unit(&mut self, u: Unit) -> String {
+        // 오토마타가 정의돼 있으면 낱자(가상단위 포함)는 오토마타 경로로 처리한다.
+        // 토글은 양쪽 모두 feed_toggle 로(현재 초성 된소리 전환), 이력만 갱신.
+        if !self.layout.automata.is_empty() {
+            let jamo = match u {
+                Unit::Jamo(j) => Some(j),
+                Unit::Virtual(id) => self.layout.virtual_units.get(&id).copied(),
+                Unit::Toggle => None,
+            };
+            if let Some(j) = jamo {
+                // 서열을 모르는 낱자(표 밖 옛한글 등)는 안전하게 휴리스틱으로.
+                if ngs_seq(j.category, j.cp).is_some() {
+                    return self.automaton_feed(j);
+                }
+            }
+        }
+        // 레거시(휴리스틱) 경로.
         let out = match u {
             Unit::Jamo(j) => self.feed_jamo(j),
             Unit::Toggle => self.feed_toggle(),
@@ -250,6 +273,138 @@ impl Engine {
             self.history.clear();
         } else {
             self.history = vec![u];
+        }
+        out
+    }
+
+    // ── 오토마타 실행 (날개셋 AutomataTable) ─────────────────────────────────────
+
+    /// 조합 중 음절의 한 칸(초/중/종) 서열번호. 비었으면 0.
+    fn slot_seq(&self, cat: Category) -> i64 {
+        let cp = match cat {
+            Category::Cho => self.cur.cho,
+            Category::Jung => self.cur.jung,
+            Category::Jong => self.cur.jong,
+        };
+        cp.and_then(|c| ngs_seq(cat, c))
+            .map(|s| s as i64)
+            .unwrap_or(0)
+    }
+
+    /// 낱자를 현재 음절의 해당 칸에 넣는다(확정 없이). 칸이 차 있으면 UnitMix 결합을
+    /// 시도하고, 결합 규칙이 없으면 교체한다(= 무한 낱자 수정). 빈 칸이면 그대로 채운다.
+    fn put_modify(&mut self, j: Jamo) {
+        let existing = match j.category {
+            Category::Cho => self.cur.cho,
+            Category::Jung => self.cur.jung,
+            Category::Jong => self.cur.jong,
+        };
+        let newcp = match existing {
+            None => j.cp,
+            Some(e) => self.layout.combine(j.category, e, j.cp).unwrap_or(j.cp),
+        };
+        match j.category {
+            Category::Cho => self.cur.cho = Some(newcp),
+            Category::Jung => self.cur.jung = Some(newcp),
+            Category::Jong => self.cur.jong = Some(newcp),
+        }
+    }
+
+    /// 빈 음절에 낱자 하나를 넣었을 때의 오토마타 상태(시작 상태에서 평가).
+    fn fresh_state(&self, j: Jamo) -> i64 {
+        let seq = ngs_seq(j.category, j.cp).map(|s| s as i64).unwrap_or(0);
+        let (a, b, c) = match j.category {
+            Category::Cho => (seq, 0, 0),
+            Category::Jung => (0, seq, 0),
+            Category::Jong => (0, 0, seq),
+        };
+        let ctx = Ctx {
+            a,
+            b,
+            c,
+            ..Default::default()
+        };
+        match self.layout.automata.get(&self.layout.automata_start) {
+            Some(st) => match st.value.eval(&ctx) {
+                Ok(Value::Int(n)) if n > 0 => n,
+                _ => self.layout.automata_start,
+            },
+            None => self.layout.automata_start,
+        }
+    }
+
+    /// 한 낱자를 오토마타로 처리한다. 확정 문자열을 돌려준다.
+    fn automaton_feed(&mut self, j: Jamo) -> String {
+        let seq = ngs_seq(j.category, j.cp).map(|s| s as i64).unwrap_or(0);
+        let (a, b, c) = match j.category {
+            Category::Cho => (seq, 0, 0),
+            Category::Jung => (0, seq, 0),
+            Category::Jong => (0, 0, seq),
+        };
+        let ctx = Ctx {
+            a,
+            b,
+            c,
+            d: self.slot_seq(Category::Cho),
+            e: self.slot_seq(Category::Jung),
+            f: self.slot_seq(Category::Jong),
+            ..Default::default() // o=0(세벌식), t=0(일반 상황)
+        };
+        // 현재 상태의 전이식 평가(실패 시 default 식, 그래도 없으면 휴리스틱).
+        let r = match self.layout.automata.get(&self.auto_state) {
+            Some(st) => match st.value.eval(&ctx) {
+                Ok(Value::Int(n)) => n,
+                _ => match st.default.eval(&ctx) {
+                    Ok(Value::Int(n)) => n,
+                    _ => return self.feed_jamo_tracked(j),
+                },
+            },
+            None => return self.feed_jamo_tracked(j),
+        };
+        self.apply_result(r, j)
+    }
+
+    /// 오토마타 결과 코드 r 에 따라 낱자를 배치한다(research/ngs-automata-help.txt).
+    /// 양수=그 상태로 조합 계속, 0=다음 글자 시작, -1=무시, -2=무한 낱자 수정,
+    /// 그 외 음수=보수적으로 현재 확정 후 새 음절(점진적으로 정교화 예정).
+    fn apply_result(&mut self, r: i64, j: Jamo) -> String {
+        match r {
+            // 조합 계속: 해당 칸에 배치(차 있으면 결합/교체) 후 상태 갱신.
+            n if n > 0 => {
+                self.put_modify(j);
+                self.auto_state = n;
+                self.history.push(Unit::Jamo(j));
+                String::new()
+            }
+            // 무한 낱자 수정: 현재 음절을 확정하지 않고 칸을 결합/교체. 상태 유지.
+            -2 => {
+                self.put_modify(j);
+                self.history.push(Unit::Jamo(j));
+                String::new()
+            }
+            // 입력 무시(소비만).
+            -1 => String::new(),
+            // 0 및 그 외 음수: 현재 음절 확정 후 이 낱자로 새 음절 시작.
+            _ => {
+                let commit = self.commit_current();
+                self.history.clear();
+                self.put_modify(j);
+                self.auto_state = self.fresh_state(j);
+                self.history.push(Unit::Jamo(j));
+                commit
+            }
+        }
+    }
+
+    /// 휴리스틱 feed_jamo + 이력 갱신(오토마타 경로의 폴백용).
+    fn feed_jamo_tracked(&mut self, j: Jamo) -> String {
+        let out = self.feed_jamo(j);
+        if out.is_empty() {
+            self.history.push(Unit::Jamo(j));
+        } else if self.cur.is_empty() {
+            self.history.clear();
+        } else {
+            self.history = vec![Unit::Jamo(j)];
         }
         out
     }
@@ -547,5 +702,104 @@ mod tests {
         let out = e.press(b' ', false); // space (table 밖) → 가 확정 + 비소비
         assert_eq!(out.commit, "가");
         assert!(!out.consumed);
+    }
+
+    // 실제 AutomataTable(상태 0/1/2)을 가진 세벌식 설정. 무한 낱자 수정 검증용.
+    // state1 에 ㅋㅋ/ㅎㅎ(서열 176/185) 연타 → 다음 글자 규칙도 포함(사용자 커스텀).
+    const AUTO: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<EditContextSetting version="0x500">
+  <EditorLayer flag="0"><FinalConvTable/></EditorLayer>
+  <InputLayer default="0" current="0">
+    <InputEntry>
+      <InputSchemeSetting object="CBasicInputScheme">
+        <KeyTable name="auto" flag="0" from="33" to="126">
+          <Key at="0x67" value="H3|G_"/>  <!-- g 초 ㄱ -->
+          <Key at="0x6E" value="H3|N_"/>  <!-- n 초 ㄴ -->
+          <Key at="0x63" value="H3|S_"/>  <!-- c 초 ㅅ -->
+          <Key at="0x6B" value="H3|K_"/>  <!-- k 초 ㅋ -->
+          <Key at="0x68" value="H3|H_"/>  <!-- h 초 ㅎ -->
+          <Key at="0x61" value="H3|A_"/>  <!-- a 중 ㅏ -->
+          <Key at="0x65" value="H3|EO"/>  <!-- e 중 ㅓ -->
+          <Key at="0x6F" value="H3|O_"/>  <!-- o 중 ㅗ -->
+          <Key at="0x6D" value="H3|_N"/>  <!-- m 종 ㄴ -->
+        </KeyTable>
+      </InputSchemeSetting>
+      <GeneratorSetting object="CNgsImeEx">
+        <UnitMixTable>
+          <UnitMix unit="JUNG" a="O_" b="A_" to="WA"/>
+        </UnitMixTable>
+        <VirtualUnitTable/>
+        <AutomataTable default="0">
+          <Automata state="0" value="1" default="0" remark="초기"/>
+          <Automata state="1" value="D==176&amp;&amp;A==176 || D==185&amp;&amp;A==185 ? 0 : A || B || C ? (A || D)&amp;&amp;(B || E) ? 2 : 1 : -2" default="-1" remark="미완성"/>
+          <Automata state="2" value="A&amp;&amp;A!=500 ? 0 : B||C||A==500 ? 2 : -2" default="0" remark="완성"/>
+        </AutomataTable>
+      </GeneratorSetting>
+    </InputEntry>
+  </InputLayer>
+</EditContextSetting>"#;
+
+    fn auto_engine() -> Engine {
+        let cfg = Config::parse(AUTO).unwrap();
+        Engine::new(cfg.compile(0).unwrap())
+    }
+
+    #[test]
+    fn automaton_loads() {
+        let e = auto_engine();
+        assert_eq!(e.layout.automata.len(), 3);
+        assert_eq!(e.auto_state, 0);
+    }
+
+    #[test]
+    fn infinite_jamo_edit_replaces_jung() {
+        // 핵심: 산(ㅅㅏㄴ) 입력 후 중성 ㅓ → 새 음절이 아니라 현재 중성 교체 → 선.
+        let mut e = auto_engine();
+        let (c, p) = typ(&mut e, "cam"); // ㅅ ㅏ ㄴ
+        assert_eq!(c, "");
+        assert_eq!(p, "산");
+        let out = e.press(b'e', false); // 중성 ㅓ
+        assert_eq!(out.commit, ""); // 확정 없음(현재 음절 수정)
+        assert_eq!(out.preedit, "선"); // 무한 낱자 수정!
+    }
+
+    #[test]
+    fn infinite_jamo_edit_jong() {
+        // 안(ㅇ 없이 ㅏㄴ은 안 됨) 대신 간(ㄱㅏㄴ) 후 종성 교체: ㄱㅏㄴ → 종성 ㄴ 자리에 또?
+        // 간 입력 후 중성 ㅗ → 곤? 아니라 중성 교체 → 곤.
+        let mut e = auto_engine();
+        typ(&mut e, "gam"); // 간
+        assert_eq!(e.preedit(), "간");
+        let out = e.press(b'o', false); // 중성 ㅗ → ㅏ 교체 → 곤
+        assert_eq!(out.preedit, "곤");
+    }
+
+    #[test]
+    fn kk_breaks_to_next_syllable() {
+        // 사용자 ㅋㅋ 규칙(state1: D==176&&A==176 → 0): ㅋ 확정 후 새 ㅋ.
+        let mut e = auto_engine();
+        let o1 = e.press(b'k', false); // 초 ㅋ
+        assert_eq!(o1.preedit, "ㅋ");
+        let o2 = e.press(b'k', false); // 또 ㅋ → 앞 ㅋ 확정 + 새 ㅋ
+        assert_eq!(o2.commit, "ㅋ");
+        assert_eq!(o2.preedit, "ㅋ");
+    }
+
+    #[test]
+    fn automaton_compound_vowel() {
+        // 겹모음은 결합 유지: ㄱ ㅗ ㅏ → 과.
+        let mut e = auto_engine();
+        let (_c, p) = typ(&mut e, "goa");
+        assert_eq!(p, "과");
+    }
+
+    #[test]
+    fn automaton_new_cho_commits() {
+        // 새 초성은 다음 글자: 가(ㄱㅏ) + ㄴ → 가 확정, 나 조합.
+        let mut e = auto_engine();
+        typ(&mut e, "ga"); // 가
+        let out = e.press(b'n', false); // 초 ㄴ
+        assert_eq!(out.commit, "가");
+        assert_eq!(out.preedit, "ㄴ");
     }
 }

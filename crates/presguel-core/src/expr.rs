@@ -26,18 +26,28 @@ pub enum ExprError {
 }
 
 /// 평가 문맥의 변수들. KeyTable 평가에는 T(오토마타 상태)와 P(수식어 비트마스크)가 쓰인다.
-/// A..E 는 오토마타 식 평가용(엔진에서 직접 쓰지 않음).
+/// 오토마타 식 평가에는 A~F(입력/조합 중 한글의 초·중·종성 서열번호), O, T 가 쓰인다.
+/// (오토마타 변수 의미는 `research/ngs-automata-help.txt` 참고.)
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ctx {
     /// 오토마타 상태 id. 0 = 한글 조합 중이 아님. (`T`)
     pub t: i64,
     /// 수식어 비트마스크. bit0 = Shift. (`P`)
     pub p: i64,
+    /// `A` = 입력 글쇠의 초성 서열(없으면 0; 갈마들이 토글이면 500).
     pub a: i64,
+    /// `B` = 입력 글쇠의 중성 서열.
     pub b: i64,
+    /// `C` = 입력 글쇠의 종성 서열.
     pub c: i64,
+    /// `D` = 조합 중 한글의 초성 서열.
     pub d: i64,
+    /// `E` = 조합 중 한글의 중성 서열.
     pub e: i64,
+    /// `F` = 조합 중 한글의 종성 서열.
+    pub f: i64,
+    /// `O` = 부가 비트(1 입력 두벌식 + 2 조합중 두벌식 + 4 인위생성). 세벌식이면 0.
+    pub o: i64,
 }
 
 impl Ctx {
@@ -50,6 +60,8 @@ impl Ctx {
             "C" => self.c,
             "D" => self.d,
             "E" => self.e,
+            "F" => self.f,
+            "O" => self.o,
             _ => return None,
         })
     }
