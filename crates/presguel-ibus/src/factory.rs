@@ -25,7 +25,9 @@ impl Factory {
 #[interface(name = "org.freedesktop.IBus.Factory")]
 impl Factory {
     async fn create_engine(&mut self, name: String) -> fdo::Result<OwnedObjectPath> {
-        if name != "presguel" {
+        // 레이아웃별 엔진(presguel, presguel:us:dvorak, ...)을 모두 받는다.
+        // 엔진 이름의 영문 배열은 GNOME 이 컴포넌트 <layout> 으로 처리하므로 조합 로직은 동일.
+        if name != "presguel" && !name.starts_with("presguel:") {
             return Err(fdo::Error::Failed(format!("알 수 없는 엔진: {name}")));
         }
         self.next += 1;

@@ -256,3 +256,24 @@ presguel-setup(GTK 설정창)에 "베이스 키보드 레이아웃" 드롭다운
 - Wayland 에 범용 setxkbmap 경로 없음, 데스크톱별 구현: https://fcitx-im.org/wiki/Using_Fcitx_5_on_Wayland
 - ArchWiki IBus (ibus 가 xkb 설정을 관리): https://wiki.archlinux.org/title/IBus
 - 로컬 비교 파일: `/usr/share/ibus/component/hangul.xml`(layout=kr, layout_variant=kr104), `m17n.xml`, `/usr/share/glib-2.0/schemas/org.freedesktop.ibus.engine.typing-booster.gschema.xml`
+
+---
+
+## 9. 최종 채택: 레이아웃별 다중 엔진 등록 (옵션 a+d 대체)
+
+§6 의 "설정창에서 레이아웃 골라 단일 엔진 XML 재생성(pkexec)" 대신, **컴포넌트에 레이아웃별
+엔진을 미리 여러 개 등록**하는 방식으로 변경(사용자 요청). 이유: GNOME 입력 소스 모델이
+"엔진 = (xkb 레이아웃, ibus 엔진) 튜플"(§1.1)이므로, 레이아웃마다 엔진을 두면 사용자가
+**GNOME 입력 소스에서 직접 고르기만 하면** 되고 pkexec·XML 재생성·재로그인 요구가 사라진다.
+
+- 엔진 이름: 기본 `presguel`(layout=us), 변형 `presguel:us:<variant>`(예 `presguel:us:dvorak`).
+  Factory 는 `presguel` 또는 `presguel:` 접두를 모두 수락(`create_engine`). 조합 로직은 동일,
+  영문 배열 차이는 GNOME 이 각 엔진의 `<layout_variant>` 로 처리(§1,§2).
+- 등록 목록(이 시스템 `GnomeDesktop.XkbInfo` 의 us 계열 영문 대체배열 전부, 17개):
+  us(QWERTY) + dvorak/dvorak-intl/dvorak-alt-intl/dvorak-classic/dvorak-l/dvorak-r/dvorak-mac/dvp
+  + colemak/colemak_dh/colemak_dh_iso/colemak_dh_ortho/colemak_dh_wide + workman/workman-intl + norman.
+- `install.sh` 가 이 목록으로 `<engine>` 블록들을 생성. longname `Presguel`/`Presguel (Dvorak)` 등.
+- 폐기: `base_layout`/`base_variant`(config.ini), `scripts/presguel-apply-layout`(pkexec 헬퍼),
+  설정창의 "단축키 키보드 배열" 드롭다운/적용 버튼. (§6 레시피는 이 방식으로 대체됨.)
+- 실기 검증: 17개 엔진 등록 확인, 데몬이 각 엔진의 layout/variant 를 올바로 보고
+  (`presguel:us:colemak`→variant=colemak 등; 데몬 완전 재시작 후 정확).

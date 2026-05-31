@@ -36,13 +36,7 @@ def xml_path():
 
 def load_ini():
     """key=value 설정을 dict 로. 없으면 기본값."""
-    cfg = {
-        "simple_mode": "false",
-        "hangul_entry": "0",
-        "latin_entry": "1",
-        "base_layout": "us",
-        "base_variant": "",
-    }
+    cfg = {"simple_mode": "false", "hangul_entry": "0", "latin_entry": "1"}
     try:
         with open(ini_path(), encoding="utf-8") as f:
             for line in f:
@@ -56,7 +50,7 @@ def load_ini():
     return cfg
 
 
-def save_ini(simple, hangul_idx, latin_idx, base_layout, base_variant):
+def save_ini(simple, hangul_idx, latin_idx):
     os.makedirs(config_dir(), exist_ok=True)
     body = (
         "# presguel 설정 (presguel-setup 가 생성). key=value 형식.\n"
@@ -66,23 +60,9 @@ def save_ini(simple, hangul_idx, latin_idx, base_layout, base_variant):
         f"hangul_entry = {hangul_idx}\n"
         "# 간단 모드에서 한/영 전환 시 쓸 영문 InputEntry 인덱스.\n"
         f"latin_entry = {latin_idx}\n"
-        "# 단축키·keysym 변환 기준 XKB 레이아웃(컴포넌트 XML 에 반영, 적용은 관리자 권한 필요).\n"
-        f"base_layout = {base_layout}\n"
-        f"base_variant = {base_variant}\n"
     )
     with open(ini_path(), "w", encoding="utf-8") as f:
         f.write(body)
-
-
-# 베이스 키보드 레이아웃 선택지: (표시 이름, xkb layout, xkb variant)
-BASE_LAYOUTS = [
-    ("미국 QWERTY", "us", ""),
-    ("Dvorak", "us", "dvorak"),
-    ("Dvorak (국제, 죽은키)", "us", "dvorak-intl"),
-    ("Colemak", "us", "colemak"),
-    ("Colemak-DH", "us", "colemak_dh"),
-    ("Workman", "us", "workman"),
-]
 
 
 def load_entries():
@@ -177,60 +157,19 @@ class SetupWindow(Adw.ApplicationWindow):
         self.latin_row.connect("notify::selected", self.on_change)
         group.add(self.latin_row)
 
-        # ── 베이스 키보드 레이아웃(단축키·keysym 변환 기준) ──────────────────────
+        # 키보드 배열 안내(단축키·영문은 GNOME 입력 소스에서 배열별 엔진을 골라 정한다).
         kbd_group = Adw.PreferencesGroup(
-            title="단축키 키보드 배열",
-            description="한글 글자 자판은 물리 위치로 고정되지만, 단축키(Ctrl/Alt+키)와 "
-            "영문 입력은 이 XKB 레이아웃을 따릅니다. 드보락 등을 쓰면 여기서 고르세요.",
+            title="키보드 배열",
+            description="한글 자판은 물리 위치로 고정됩니다. 단축키(Ctrl/Alt+키)와 영문 배열은 "
+            "GNOME 설정 → 키보드 → 입력 소스에서 'Presguel (Dvorak)' 처럼 원하는 배열의 항목을 "
+            "골라 정하세요.",
         )
         page.add(kbd_group)
-
-        # 현재 config 의 base_layout/base_variant 에 맞는 콤보 항목을 찾는다.
-        self._base_labels = [lbl for lbl, _, _ in BASE_LAYOUTS]
-        cur_layout = cfg.get("base_layout", "us") or "us"
-        cur_variant = cfg.get("base_variant", "")
-        self._base_index = 0
-        for i, (_, lay, var) in enumerate(BASE_LAYOUTS):
-            if lay == cur_layout and var == cur_variant:
-                self._base_index = i
-                break
-        else:
-            # 목록에 없는 사용자 지정값이면 항목을 추가해 잃지 않는다.
-            custom = f"사용자 지정: {cur_layout}" + (f"+{cur_variant}" if cur_variant else "")
-            BASE_LAYOUTS.append((custom, cur_layout, cur_variant))
-            self._base_labels.append(custom)
-            self._base_index = len(BASE_LAYOUTS) - 1
-
-        self.base_row = Adw.ComboRow(
-            title="베이스 레이아웃",
-            subtitle="단축키가 따를 키보드 배열",
-            model=Gtk.StringList.new(self._base_labels),
-        )
-        self.base_row.set_selected(self._base_index)
-        self.base_row.connect("notify::selected", self.on_change)
-        kbd_group.add(self.base_row)
-
-        # 시스템 적용 버튼(컴포넌트 XML 은 root 소유 → pkexec 로 권한 상승).
-        apply_row = Adw.ActionRow(
-            title="시스템에 적용",
-            subtitle="관리자 권한이 필요하며, 적용 후 다시 로그인해야 반영됩니다.",
-        )
-        self.apply_btn = Gtk.Button(label="적용…")
-        self.apply_btn.set_valign(Gtk.Align.CENTER)
-        self.apply_btn.connect("clicked", self.on_apply_layout)
-        apply_row.add_suffix(self.apply_btn)
-        apply_row.set_activatable_widget(self.apply_btn)
-        kbd_group.add(apply_row)
-
-        self._apply_status = Gtk.Label(xalign=0, wrap=True)
-        self._apply_status.add_css_class("dim-label")
-        kbd_group.add(self._apply_status)
 
         # 안내 행.
         note = Adw.PreferencesGroup()
         lbl = Gtk.Label(
-            label="입력 동작 설정은 즉시 적용됩니다(입력창을 다시 누르면 반영). "
-            "베이스 레이아웃은 '시스템에 적용' 후 재로그인이 필요합니다.",
+            label="입력 동작 설정은 즉시 적용됩니다(입력 중이었다면 입력창을 다시 누르면 반영).",
             xalign=0,
             wrap=True,
         )
@@ -252,14 +191,6 @@ class SetupWindow(Adw.ApplicationWindow):
         self.hangul_row.set_sensitive(on)
         self.latin_row.set_sensitive(on)
 
-    def _base_layout_variant(self):
-        """현재 콤보 선택의 (layout, variant)."""
-        idx = self.base_row.get_selected()
-        if 0 <= idx < len(BASE_LAYOUTS):
-            _, lay, var = BASE_LAYOUTS[idx]
-            return lay, var
-        return "us", ""
-
     def on_change(self, *_):
         """위젯이 바뀔 때마다 즉시 config.ini 저장(GNOME instant-apply)."""
         self._sync_sensitivity()
@@ -268,41 +199,7 @@ class SetupWindow(Adw.ApplicationWindow):
         simple = self.simple_row.get_active()
         h = self.hangul_row.get_selected() if self.entries else 0
         l = self.latin_row.get_selected() if self.entries else 1
-        lay, var = self._base_layout_variant()
-        save_ini(simple, h, l, lay, var)
-
-    def on_apply_layout(self, *_):
-        """베이스 레이아웃을 시스템 컴포넌트 XML 에 적용(pkexec → 권한 헬퍼)."""
-        lay, var = self._base_layout_variant()
-        argv = ["pkexec", "/usr/local/bin/presguel-apply-layout", lay]
-        if var:
-            argv.append(var)
-        try:
-            proc = Gio.Subprocess.new(
-                argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE
-            )
-        except Exception as e:  # noqa: BLE001
-            self._apply_status.set_text(f"적용 실행 실패: {e}")
-            return
-        self.apply_btn.set_sensitive(False)
-        self._apply_status.set_text("적용 중…")
-
-        def done(p, res):
-            self.apply_btn.set_sensitive(True)
-            try:
-                ok, _out, _err = p.communicate_utf8_finish(res)
-            except Exception as e:  # noqa: BLE001
-                self._apply_status.set_text(f"적용 실패: {e}")
-                return
-            if p.get_successful():
-                tag = lay + (f"+{var}" if var else "")
-                self._apply_status.set_text(
-                    f"적용됨: {tag}. 다시 로그인하면 단축키가 이 배열을 따릅니다."
-                )
-            else:
-                self._apply_status.set_text("적용이 취소되었거나 실패했습니다.")
-
-        proc.communicate_utf8_async(None, None, done)
+        save_ini(simple, h, l)
 
 
 class SetupApp(Adw.Application):
