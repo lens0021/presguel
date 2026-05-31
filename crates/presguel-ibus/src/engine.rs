@@ -90,10 +90,10 @@ impl Mode {
     fn is_hangul(&self) -> bool {
         matches!(self, Mode::Hangul(_))
     }
-    /// 패널 심볼 접두(날개셋 방식: 한글=가, 로마자/직접=A).
+    /// 패널 심볼 접두(한글=글, 로마자/직접=A).
     fn symbol_prefix(&self) -> &'static str {
         if self.is_hangul() {
-            "가"
+            "글"
         } else {
             "A"
         }
@@ -273,8 +273,8 @@ impl IBusEngine {
         }
     }
 
-    /// 패널 심볼: 접두(한글=가, 로마자/직접=A)에 항목 번호를 아래첨자로 붙인다(예: "가₀").
-    /// 간단 모드에서는 한글/영문 둘뿐이라 번호 없이 접두만 보인다(예: "가", "A").
+    /// 패널 심볼: 접두(한글=글, 로마자/직접=A)에 항목 번호를 아래첨자로 붙인다(예: "글₀").
+    /// 간단 모드에서는 한글/영문 둘뿐이라 번호 없이 접두만 보인다(예: "글", "A").
     fn mode_symbol(&self) -> String {
         let prefix = self.cur().symbol_prefix();
         if self.settings.simple_mode {
@@ -558,7 +558,7 @@ mod tests {
     fn mode_symbol_full_uses_subscript() {
         // 전체 모드(기본): 접두 + 아래첨자 항목번호. MINI 는 한글 항목 1개, current=0.
         let e = engine();
-        assert_eq!(e.mode_symbol(), "가₀");
+        assert_eq!(e.mode_symbol(), "글₀");
     }
 
     #[test]
@@ -574,7 +574,7 @@ mod tests {
                 shortcuts_enabled: true,
             },
         );
-        assert_eq!(e.mode_symbol(), "가");
+        assert_eq!(e.mode_symbol(), "글");
     }
 
     #[test]
