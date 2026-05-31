@@ -37,6 +37,14 @@ fn debug_keys_enabled() -> bool {
     )
 }
 
+/// 정수를 유니코드 아래첨자 숫자(U+2080..U+2089)로 만든다. 패널 심볼의 항목 번호용.
+fn subscript_digits(n: usize) -> String {
+    n.to_string()
+        .chars()
+        .map(|c| char::from_u32(0x2080 + (c as u32 - '0' as u32)).unwrap_or(c))
+        .collect()
+}
+
 /// 수식어 키 자체(Shift/Ctrl/Caps/Meta/Alt/Super/Hyper, ISO_Level shifts, Mode_switch)인가.
 /// 이런 키는 텍스트가 아니므로 조합에 영향을 주지 않고 그대로 통과시켜야 한다.
 fn is_modifier_keysym(keyval: u32) -> bool {
@@ -258,13 +266,14 @@ impl IBusEngine {
     }
 
     /// 입력 모드 속성을 등록(패널이 심볼을 알도록). focus_in/enable 시 호출.
+    /// 레이블("Presguel 설정")은 패널 컨텍스트 메뉴에 뜨며, 누르면 property_activate 가 설정창을 연다.
     async fn register_props(&self, se: &SignalEmitter<'_>) {
-        let _ = Self::register_properties(se, make_prop_list(&self.mode_symbol(), "Presguel")).await;
+        let _ = Self::register_properties(se, make_prop_list(&self.mode_symbol(), "Presguel 설정")).await;
     }
 
     /// 모드가 바뀌었을 때 패널 심볼을 갱신.
     async fn update_indicator(&self, se: &SignalEmitter<'_>) {
-        let _ = Self::update_property(se, make_input_mode_property(&self.mode_symbol(), "Presguel")).await;
+        let _ = Self::update_property(se, make_input_mode_property(&self.mode_symbol(), "Presguel 설정")).await;
     }
 
     /// 키 이벤트를 분류한다(순수 함수). `process_key_event` 가 이 결과로 분기한다.
@@ -428,7 +437,16 @@ impl IBusEngine {
 
     fn set_cursor_location(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {}
 
-    fn property_activate(&mut self, _name: String, _state: u32) {}
+    fn property_activate(&mut self, name: String, _state: u32) {
+        // 패널 컨텍스트 메뉴에서 InputMode 속성(설정 항목)을 누르면 설정창을 띄운다.
+        if name == "InputMode" {
+            let _ = std::process::Command::new("presguel-setup")
+                .spawn()
+                .or_else(|_| {
+                    std::process::Command::new("/usr/local/bin/presguel-setup").spawn()
+                });
+        }
+    }
 
     fn page_up(&mut self) {}
     fn page_down(&mut self) {}
@@ -494,6 +512,31 @@ mod tests {
     fn engine() -> IBusEngine {
         let cfg = Config::parse(MINI).unwrap();
         IBusEngine::with_settings(&cfg, Settings::default())
+    }
+
+    #[test]
+    fn subscript_digits_maps_to_unicode() {
+        assert_eq!(subscript_digits(0), "₀");
+        assert_eq!(subscript_digits(2), "₂");
+        assert_eq!(subscript_digits(10), "₁₀");
+    }
+
+    #[test]
+    fn mode_symbol_full_uses_subscript() {
+        // 전체 모드(기본): 접두 + 아래첨자 항목번호. MINI 는 한글 항목 1개, current=0.
+        let e = engine();
+        assert_eq!(e.mode_symbol(), "가₀");
+    }
+
+    #[test]
+    fn mode_symbol_simple_has_no_number() {
+        // 간단 모드: 번호 없이 접두만.
+        let cfg = Config::parse(MINI).unwrap();
+        let e = IBusEngine::with_settings(
+            &cfg,
+            Settings { simple_mode: true, hangul_entry: 0, latin_entry: 0 },
+        );
+        assert_eq!(e.mode_symbol(), "가");
     }
 
     #[test]
