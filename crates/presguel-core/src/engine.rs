@@ -157,9 +157,13 @@ impl Engine {
     }
 
     /// 현재 음절을 확정하고 버퍼·이력을 모두 비운다.
+    /// 한글 조합 흐름을 끊는 확정(공백·기호·미배열 글쇠 통과 등)이므로 BkspAttach
+    /// 되살리기 스택을 비운다. 확정 글자 뒤에 비-한글 문자가 끼면 그 글자에 다시
+    /// "달라붙을" 수 없기 때문(그랬다간 백스페이스가 사이의 공백 대신 글자를 지움).
     fn commit_and_clear(&mut self) -> String {
         let s = self.commit_current();
         self.history.clear();
+        self.prev_syllables.clear();
         s
     }
 
@@ -167,6 +171,7 @@ impl Engine {
     pub fn flush(&mut self) -> String {
         let s = self.commit_current();
         self.history.clear();
+        self.prev_syllables.clear();
         self.auto_state = self.layout.automata_start;
         self.bksp_streak = None;
         s
@@ -176,6 +181,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.cur = Syllable::default();
         self.history.clear();
+        self.prev_syllables.clear();
         self.auto_state = self.layout.automata_start;
         self.bksp_streak = None;
     }
@@ -480,12 +486,28 @@ impl Engine {
         let expr = match self.layout.keys.get(&(ascii as u32)) {
             Some(e) => e.clone(),
             None => {
-                // 배열에 없는 글쇠 → 현재 음절 확정 후 원래 키를 응용으로 넘김
-                let commit = self.commit_and_clear();
+                // 배열에 없는 인쇄 글쇠(예: 공백).
+                let mut commit = self.commit_and_clear();
+                if commit.is_empty() {
+                    // 조합 중이 아니면 우리가 확정할 것이 없으니 원래 키를 응용에 넘긴다.
+                    return KeyOutcome {
+                        commit,
+                        preedit: String::new(),
+                        consumed: false,
+                        delete_before: 0,
+                    };
+                }
+                // 조합 중이었으면 그 음절을 확정한 뒤 이 글쇠 문자까지 우리가 직접 확정하고
+                // 소비한다. commit_text 를 보내고 consumed=false 로 돌려주면 일부 앱이 글쇠를
+                // 또 입력해 공백이 두 번 들어가므로(앱 의존적), 한 이벤트에서 확정과 통과를
+                // 섞지 않는다.
+                if let Some(ch) = char::from_u32(ascii as u32) {
+                    commit.push(ch);
+                }
                 return KeyOutcome {
                     commit,
                     preedit: String::new(),
-                    consumed: false,
+                    consumed: true,
                     delete_before: 0,
                 };
             }
@@ -852,12 +874,12 @@ mod tests {
     }
 
     #[test]
-    fn space_not_in_table_passes_through() {
+    fn space_not_in_table_commits_and_consumes() {
         let mut e = engine();
         typ(&mut e, "kf"); // 가
-        let out = e.press(b' ', false); // space (table 밖) → 가 확정 + 비소비
-        assert_eq!(out.commit, "가");
-        assert!(!out.consumed);
+        let out = e.press(b' ', false); // space(table 밖): 가 + 공백을 함께 확정하고 소비
+        assert_eq!(out.commit, "가 ");
+        assert!(out.consumed); // 한 이벤트에서 확정+통과를 섞지 않음(앱 중복 입력 방지)
     }
 
     // 실제 AutomataTable(상태 0/1/2)을 가진 세벌식 설정. 무한 낱자 수정 검증용.
@@ -1163,5 +1185,65 @@ mod tests {
         assert_eq!(o5.preedit, "");
         let o6 = e.backspace(); // 더 되살릴 것 없음 → 통과
         assert!(!o6.consumed);
+    }
+
+    #[test]
+    fn space_after_syllable_commits_char_and_consumes() {
+        // 조합 중 공백: 음절을 확정하고 공백 문자까지 우리가 확정해 **소비**한다(앱이
+        // 공백을 또 넣어 두 칸이 되는 것을 방지). 그 뒤 빈 백스페이스는 통과해
+        // 앱이 공백을 지운다(확정 글자로 "달라붙기" 안 함).
+        let mut e = attach_engine();
+        let mut committed = String::new();
+        for ch in "gana".chars() {
+            committed.push_str(&e.press(ch as u8, false).commit);
+        }
+        assert_eq!(committed, "가"); // 가 확정, 나 조합 중
+        assert_eq!(e.preedit(), "나");
+        let sp = e.press(b' ', false);
+        assert_eq!(sp.commit, "나 "); // 나 + 공백 함께 확정
+        assert!(sp.consumed); // 공백을 소비(앱이 또 넣지 않음)
+        assert_eq!(sp.preedit, "");
+        let bk = e.backspace(); // 공백 뒤 빈 백스페이스 → 통과(앱이 공백 삭제)
+        assert!(!bk.consumed);
+        assert_eq!(bk.delete_before, 0);
+        assert_eq!(bk.preedit, "");
+    }
+
+    #[test]
+    fn space_with_empty_buffer_passes_through() {
+        // 조합 중이 아닐 때 공백은 확정할 게 없으니 통과(consumed=false, commit 빔).
+        let mut e = attach_engine();
+        let sp = e.press(b' ', false);
+        assert_eq!(sp.commit, "");
+        assert!(!sp.consumed);
+    }
+
+    #[test]
+    fn reset_clears_attach_history() {
+        // 한글 확정으로 되살리기 스택이 찼더라도 컨텍스트 리셋 후 빈 백스페이스는
+        // 통과해야 한다(예전: 스택이 남아 빈 상태 백스페이스가 글자를 만들어냈다).
+        let mut e = attach_engine();
+        for ch in "gan".chars() {
+            let _ = e.press(ch as u8, false); // 가 확정(스택), ㄴ 조합
+        }
+        e.reset();
+        let bk = e.backspace();
+        assert!(!bk.consumed);
+        assert_eq!(bk.preedit, "");
+        assert_eq!(bk.delete_before, 0);
+    }
+
+    #[test]
+    fn flush_clears_attach_history() {
+        // flush(포커스 아웃 등) 후에도 되살리기 스택이 남지 않아야 한다.
+        let mut e = attach_engine();
+        for ch in "gan".chars() {
+            let _ = e.press(ch as u8, false);
+        }
+        let _ = e.flush();
+        let bk = e.backspace();
+        assert!(!bk.consumed);
+        assert_eq!(bk.preedit, "");
+        assert_eq!(bk.delete_before, 0);
     }
 }
