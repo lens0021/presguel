@@ -262,9 +262,21 @@ impl IBusEngine {
             make_preedit_text(preedit.to_string()),
             cursor,
             !preedit.is_empty(),
-            0, // IBusPreeditFocusMode::CLEAR
+            1, // IBusPreeditFocusMode::COMMIT: 포커스 잃을 때 클라이언트가 preedit 를
+               // 그 자리에서 확정한다(엔진 전환 등으로 commit_text 가 누락되는 것 방지).
         )
         .await;
+    }
+
+    /// 포커스 상실/비활성화용: 조합 내부 상태만 비우고 **emit 하지 않는다**. 표시 중인
+    /// preedit 는 클라이언트가 COMMIT 모드로 그 자리에서 확정하므로 우리가 지우면 안 된다
+    /// (지우면 확정할 게 없어져 글자가 사라진다). 내부 core 만 비워 다음 포커스와 어긋나지
+    /// 않게 한다.
+    fn drop_composing(&mut self) {
+        let i = self.current;
+        if let Mode::Hangul(core) = &mut self.entries[i] {
+            core.reset();
+        }
     }
 
     /// 현재 항목이 한글 조합이면 조합을 확정해 내보낸다.
@@ -495,18 +507,18 @@ impl IBusEngine {
 
     async fn focus_out(
         &mut self,
-        #[zbus(signal_emitter)] se: SignalEmitter<'_>,
+        #[zbus(signal_emitter)] _se: SignalEmitter<'_>,
     ) -> fdo::Result<()> {
-        self.flush_current(&se).await;
+        // preedit 는 그대로 두고(클라이언트가 COMMIT 모드로 확정) 내부만 비운다.
+        self.drop_composing();
         Ok(())
     }
 
     async fn reset(&mut self, #[zbus(signal_emitter)] se: SignalEmitter<'_>) -> fdo::Result<()> {
-        // 조합 중인 글자는 버리지 않고 확정한다. GNOME 은 같은 앱에 포커스를 둔 채 입력
-        // 소스를 바꿀 때(예: CapsLock 으로 엔진 전환) Reset 을 호출하는데, 여기서 버리면
-        // 조합 중이던 한글이 사라진다. focus_out/disable 과 같이 flush 로 확정한다.
-        self.flush_current(&se).await;
-        Self::emit(&se, "", "").await; // 확정이 없었어도 preedit 는 비운다.
+        // 명시적 Reset(취소): 조합을 비우고 preedit 도 지운다. (엔진 전환은 Reset 이 아니라
+        // focus_out 경로로 오며, 거기선 COMMIT 모드로 글자를 보존한다.)
+        self.drop_composing();
+        Self::emit(&se, "", "").await;
         Ok(())
     }
 
@@ -526,8 +538,9 @@ impl IBusEngine {
         self.got_surrounding = true;
     }
 
-    async fn disable(&mut self, #[zbus(signal_emitter)] se: SignalEmitter<'_>) -> fdo::Result<()> {
-        self.flush_current(&se).await;
+    async fn disable(&mut self, #[zbus(signal_emitter)] _se: SignalEmitter<'_>) -> fdo::Result<()> {
+        // focus_out 과 동일: preedit 는 클라이언트가 COMMIT, 내부만 비운다.
+        self.drop_composing();
         Ok(())
     }
 
