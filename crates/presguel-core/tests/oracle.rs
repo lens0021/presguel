@@ -11,7 +11,7 @@ use presguel_core::Engine;
 
 fn config_path() -> Option<PathBuf> {
     let p = std::env::var("PRESGUEL_TEST_CONFIG")
-        .unwrap_or_else(|_| "/home/nemo/git/lens/provision/config/nalgaeset.xml".to_string());
+        .unwrap_or_else(|_| "/home/nemo/git/lens/provision/config/layout.xml".to_string());
     let p = PathBuf::from(p);
     p.exists().then_some(p)
 }

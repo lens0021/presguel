@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Clean-room 스키마 검증 픽스처(종합 설정 .set). 실제 날개셋 파일이 아니라
+     presguel 가 읽는 요소를 두루 포함하도록 손으로 작성한 최소 예제다. -->
+<EditContextSetting version="0x500">
+  <EditorLayer flag="DEL_MOVE|ARROW_MOVE">
+    <ShortcutTable>
+      <Shortcut key="VK_HANGUL" usage="IME_SWITCH" value="!A"/>
+      <Shortcut key="VK_HANJA" usage="KEYCHAR" value="C0|0x82"/>
+    </ShortcutTable>
+    <FinalConvTable>
+      <FinalConv from="0x1100" to="0x3131"/>
+      <FinalConv from="0x11A8" to="0x3131"/>
+    </FinalConvTable>
+  </EditorLayer>
+  <InputLayer default="0" current="0">
+    <InputEntry>
+      <InputSchemeSetting flag="0" object="CBasicInputScheme">
+        <KeyTable name="example" flag="0" from="33" to="126">
+          <Key at="0x6B" value="H3|G_"/>
+          <Key at="0x66" value="H3|_A"/>
+          <Key at="0x21" value="T ? H3|_GG : 0x21"/>
+        </KeyTable>
+      </InputSchemeSetting>
+      <GeneratorSetting flag="0" object="CNgsIme">
+        <UnitMixTable predefined="SEBEOLSIK">
+          <UnitMix unit="CHO" a="H3|G_" b="H3|G_" to="H3|GG"/>
+          <UnitMix unit="JUNG" a="H3|_O" b="H3|_A" to="H3|_WA"/>
+        </UnitMixTable>
+        <VirtualUnitTable>
+          <VirtualUnit unit="JUNG" from="128" to="H3|_O"/>
+        </VirtualUnitTable>
+        <UnitAbbrTable/>
+        <AutomataTable default="0" predefined="SEQUENTIAL">
+          <Automata state="0" value="0" default="0" remark="start"/>
+        </AutomataTable>
+        <Extra>
+          <Bksp key="0" value1="0" value2="0" condition1="0" condition2="0"/>
+        </Extra>
+      </GeneratorSetting>
+    </InputEntry>
+  </InputLayer>
+</EditContextSetting>

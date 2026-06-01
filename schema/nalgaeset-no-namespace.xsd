@@ -1,0 +1,360 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  *** 이 파일은 nalgaeset.xsd 의 no-namespace 변형입니다. ***
+  *** 본문은 정본과 동일해야 하며, 헤더(네임스페이스)만 다릅니다. ***
+  *** 네임스페이스 없는 실제 날개셋 인스턴스를 그대로 검증할 때 씁니다. ***
+
+  날개셋(Nalgaeset) 설정 파일의 XML Schema.
+  대상: 종합 설정(.set, 루트 EditContextSetting), 유형(.ist, 루트 InputEntry),
+  글쇠배열(.key, 루트 KeyTable). 셋은 같은 스키마의 중첩 노드이며 .set ⊃ .ist ⊃ .key.
+
+  근거: 날개셋 설정을 읽는 구현이 실제로 인식하는 요소·속성 구조와, 실제
+  날개셋이 내보낸 표본 파일들. 스키마는 그 트리만 규정한다.
+
+  ── 네임스페이스에 관한 주의 ──────────────────────────────────────────────
+  targetNamespace 는 프로젝트 식별용으로 둔다. 그러나 실제 날개셋 인스턴스
+  문서에는 네임스페이스 선언이 없다(로컬 이름만 매칭). 따라서 이 스키마를 글자
+  그대로 적용하려면 인스턴스 루트에
+  xmlns="https://chaotic-ground.github.io/nalgaeset-reverse-spec" 를 붙여야 한다.
+  네임스페이스가 전혀 없는 "맨몸" 인스턴스(실제 날개셋 출력)도 허용하는 관용
+  변형은 같은 디렉터리의 nalgaeset-no-namespace.xsd 로 둔다(본문 동일, 헤더에서
+  targetNamespace·기본 xmlns 제거, elementFormDefault="unqualified"). 본 파일은
+  네임스페이스가 있는 정본을, 그 파일은 맨몸 인스턴스 검증용을 규정하며 둘은
+  반드시 같은 내용을 유지한다.
+
+  ── 단독 저장 루트(.ist/.key) ────────────────────────────────────────────
+  같은 스키마의 하위 노드를 루트로 단독 저장할 수 있다: 유형(.ist)은 InputEntry,
+  글쇠배열(.key)은 KeyTable 가 루트가 된다. 그래서 EditContextSetting 과 함께
+  이 둘도 전역(루트 가능) 요소로 선언한다.
+
+  ── 필수/선택 판단 근거 ──────────────────────────────────────────────────
+  핵심 속성(예: Key/@at, Key/@value, UnitMix 의 unit/a/b/to)은 문서 규약상
+  use="required". 누락 시 의미가 성립하나 구현이 폴백하는 항목은 use="optional".
+  즉 "구현이 견디는가"가 아니라 "문서로서 유효한가" 기준이다.
+
+  ── 값/식 문자열 ─────────────────────────────────────────────────────────
+  value, value1/2, condition1/2, default(Automata), a/b/to(UnitMix) 등은
+  날개셋 수식 문법을 담는 자유 문자열이라 xs:string 으로 둔다. 문법 자체는
+  스키마가 아니라 사양 본문이 규정한다.
+
+  ── 미충분 관측 표(lax) ──────────────────────────────────────────────────
+  KeyProgramTable, UnitAbbrTable, UnitSubstTable, HanSubstTable, UserCandiTable,
+  UserCompoTable, UserKeyTable 는 실제 파일에 존재하나 표본에서 대개 비어 있어
+  내부 구조가 드러나지 않았다. clean-room 원칙상 과대 규정하지 않고 자식·속성을
+  관용 허용(xs:any/anyAttribute, processContents=skip)하며, 관측된 속성만 명시한다.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           elementFormDefault="unqualified"
+           attributeFormDefault="unqualified">
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       공통 단순형(simpleType)
+       ───────────────────────────────────────────────────────────────────── -->
+
+  <!-- 정수 리터럴. 10진과 "0x" 16진을 모두 받는다(부호 없는 코드포인트/서열). -->
+  <xs:simpleType name="IntLiteral">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="(0[xX][0-9A-Fa-f]+)|([0-9]+)"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 낱자 갈래. 정확히 이 셋만 허용. -->
+  <xs:simpleType name="Category">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="CHO"/>
+      <xs:enumeration value="JUNG"/>
+      <xs:enumeration value="JONG"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- '|' 로 이어 붙인 플래그 목록(예 "DEL_MOVE|ARROW_MOVE").
+       형태만 규정하고 항목명은 열거하지 않는다. -->
+  <xs:simpleType name="FlagList">
+    <xs:restriction base="xs:string"/>
+  </xs:simpleType>
+
+  <!-- 날개셋 수식/값 문자열(자유형). 문법은 사양 본문이 규정. -->
+  <xs:simpleType name="Expr">
+    <xs:restriction base="xs:string"/>
+  </xs:simpleType>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       루트: EditContextSetting (종합 설정 .set)
+       자식 순서: EditorLayer, 그다음 InputLayer.
+       ───────────────────────────────────────────────────────────────────── -->
+  <xs:element name="EditContextSetting">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="EditorLayer" type="EditorLayerType"/>
+        <xs:element name="InputLayer" type="InputLayerType"/>
+      </xs:sequence>
+      <!-- version: 없으면 "". 문서 규약상 권장이라 optional. -->
+      <xs:attribute name="version" type="xs:string" use="optional"/>
+    </xs:complexType>
+  </xs:element>
+
+  <!-- 단독 저장 루트: 유형(.ist)=InputEntry, 글쇠배열(.key)=KeyTable.
+       형식은 .set 의 하위 노드와 동일하므로 같은 타입을 재사용한다. -->
+  <xs:element name="InputEntry" type="InputEntryType"/>
+  <xs:element name="KeyTable"   type="KeyTableType"/>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       EditorLayer: 단축글쇠 표 + 최종 변환표.
+       래퍼(ShortcutTable/FinalConvTable)는 항상 두되 둘 다 optional.
+       ───────────────────────────────────────────────────────────────────── -->
+  <xs:complexType name="EditorLayerType">
+    <xs:sequence>
+      <xs:element name="ShortcutTable" type="ShortcutTableType" minOccurs="0"/>
+      <xs:element name="FinalConvTable" type="FinalConvTableType" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="flag" type="FlagList" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="ShortcutTableType">
+    <xs:sequence>
+      <xs:element name="Shortcut" type="ShortcutType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Shortcut: key/usage 는 단축키가 의미를 가지려면 필요 → required. -->
+  <xs:complexType name="ShortcutType">
+    <xs:attribute name="key"      type="xs:string" use="required"/>
+    <xs:attribute name="usage"    type="xs:string" use="required"/>
+    <xs:attribute name="value"    type="Expr"      use="optional"/>
+    <xs:attribute name="modifier" type="FlagList"  use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="FinalConvTableType">
+    <xs:sequence>
+      <xs:element name="FinalConv" type="FinalConvType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- FinalConv: from/to 둘 다 정수, 필수. -->
+  <xs:complexType name="FinalConvType">
+    <xs:attribute name="from" type="IntLiteral" use="required"/>
+    <xs:attribute name="to"   type="IntLiteral" use="required"/>
+  </xs:complexType>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       InputLayer: 입력 항목들의 컨테이너.
+       default/current 는 폴백 0 → optional. InputEntry 0개 이상.
+       ───────────────────────────────────────────────────────────────────── -->
+  <xs:complexType name="InputLayerType">
+    <xs:sequence>
+      <xs:element name="InputEntry" type="InputEntryType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="default" type="IntLiteral" use="optional"/>
+    <xs:attribute name="current" type="IntLiteral" use="optional"/>
+  </xs:complexType>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       InputEntry: InputSchemeSetting + GeneratorSetting (유형 .ist 의 루트이기도).
+       단독 .ist 나 패스스루 항목은 한쪽 섹션만 있을 수 있어 둘 다 optional.
+       ───────────────────────────────────────────────────────────────────── -->
+  <xs:complexType name="InputEntryType">
+    <xs:sequence>
+      <xs:element name="InputSchemeSetting" type="InputSchemeSettingType" minOccurs="0"/>
+      <xs:element name="GeneratorSetting"   type="GeneratorSettingType"   minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- InputSchemeSetting: object(스킴 클래스명) + KeyTable(+KeyProgramTable).
+       Key 는 이 안의 KeyTable 에 온다. 자식 순서무관(xs:all). -->
+  <xs:complexType name="InputSchemeSettingType">
+    <xs:all>
+      <xs:element name="KeyTable"        type="KeyTableType"        minOccurs="0"/>
+      <xs:element name="KeyProgramTable" type="KeyProgramTableType" minOccurs="0"/>
+    </xs:all>
+    <!-- object: 항목 식별에 쓰이나 구현은 ""도 견딤 → optional. -->
+    <xs:attribute name="object" type="xs:string" use="optional"/>
+    <xs:attribute name="flag"   type="FlagList"  use="optional"/>
+  </xs:complexType>
+
+  <!-- KeyTable: name/flag/from/to + Key* (글쇠배열 .key 의 루트이기도).
+       from/to 폴백 33/126(ASCII '!'~'~') → optional. -->
+  <xs:complexType name="KeyTableType">
+    <xs:sequence>
+      <xs:element name="Key" type="KeyType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="optional"/>
+    <xs:attribute name="flag" type="FlagList"  use="optional"/>
+    <xs:attribute name="from" type="IntLiteral" use="optional"/>
+    <xs:attribute name="to"   type="IntLiteral" use="optional"/>
+  </xs:complexType>
+
+  <!-- Key: at(ASCII 코드) + value(값-식). 둘 다 없으면 키 정의가 성립하지 않음 → required. -->
+  <xs:complexType name="KeyType">
+    <xs:attribute name="at"    type="IntLiteral" use="required"/>
+    <xs:attribute name="value" type="Expr"       use="required"/>
+  </xs:complexType>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       GeneratorSetting: 한글 생성기 설정.
+       자식 표: UnitMixTable, VirtualUnitTable, UnitAbbrTable, UnitSubstTable,
+       HanSubstTable, UserCandiTable, UserCompoTable, UserKeyTable, AutomataTable,
+       Extra. 파일마다 출현·순서가 달라(예 UnitAbbrTable 가 AutomataTable 앞)
+       순서무관(xs:all)·전부 optional 로 둔다. 패스스루 생성기(CIme 등)는 표가
+       전혀 없을 수 있다. flagex 등 부가 속성은 anyAttribute 로 관용 허용.
+       (UnitAbbr/UnitSubst/HanSubst/UserCandi/UserCompo/UserKey 표는 lax — 하단 참조.)
+       ───────────────────────────────────────────────────────────────────── -->
+  <xs:complexType name="GeneratorSettingType">
+    <xs:all>
+      <xs:element name="UnitMixTable"     type="UnitMixTableType"     minOccurs="0"/>
+      <xs:element name="VirtualUnitTable" type="VirtualUnitTableType" minOccurs="0"/>
+      <xs:element name="UnitAbbrTable"    type="UnitAbbrTableType"    minOccurs="0"/>
+      <xs:element name="UnitSubstTable"   type="UnitSubstTableType"   minOccurs="0"/>
+      <xs:element name="HanSubstTable"    type="HanSubstTableType"    minOccurs="0"/>
+      <xs:element name="UserCandiTable"   type="UserCandiTableType"   minOccurs="0"/>
+      <xs:element name="UserCompoTable"   type="UserCompoTableType"   minOccurs="0"/>
+      <xs:element name="UserKeyTable"     type="UserKeyTableType"     minOccurs="0"/>
+      <xs:element name="JackolanternTable" type="JackolanternTableType" minOccurs="0"/>
+      <xs:element name="AutomataTable"    type="AutomataTableType"    minOccurs="0"/>
+      <xs:element name="Extra"            type="ExtraType"            minOccurs="0"/>
+    </xs:all>
+    <xs:attribute name="object" type="xs:string" use="optional"/>
+    <xs:attribute name="flag"   type="FlagList"  use="optional"/>
+    <!-- 구현이 읽지 않는 부가 속성(flagex 등)을 허용. -->
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- UnitMixTable: 겹낱자/된소리/겹모음 조합 규칙.
+       predefined: 미리 정의된 자판 묶음 이름(예 DOOBEOLSIK, SEBEOLSIK). optional. -->
+  <xs:complexType name="UnitMixTableType">
+    <xs:sequence>
+      <xs:element name="UnitMix" type="UnitMixType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="predefined" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <!-- UnitMix: unit(갈래) + a,b → to. 네 속성 모두 조합 의미에 필수. -->
+  <xs:complexType name="UnitMixType">
+    <xs:attribute name="unit" type="Category" use="required"/>
+    <xs:attribute name="a"    type="Expr"     use="required"/>
+    <xs:attribute name="b"    type="Expr"     use="required"/>
+    <xs:attribute name="to"   type="Expr"     use="required"/>
+  </xs:complexType>
+
+  <!-- VirtualUnitTable: 가상 단위(서열 id → 실제 자모) 표. -->
+  <xs:complexType name="VirtualUnitTableType">
+    <xs:sequence>
+      <xs:element name="VirtualUnit" type="VirtualUnitType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- VirtualUnit: unit + from(가상 id) → to(자모식). -->
+  <xs:complexType name="VirtualUnitType">
+    <xs:attribute name="unit" type="Category"   use="required"/>
+    <xs:attribute name="from" type="IntLiteral" use="required"/>
+    <xs:attribute name="to"   type="Expr"       use="required"/>
+  </xs:complexType>
+
+  <!-- AutomataTable: 입력 오토마타. default 는 시작 상태(폴백 0) → optional. -->
+  <xs:complexType name="AutomataTableType">
+    <xs:sequence>
+      <xs:element name="Automata" type="AutomataType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="default"    type="IntLiteral" use="optional"/>
+    <!-- predefined: 미리 정의된 오토마타 이름(예 SEQUENTIAL). optional. -->
+    <xs:attribute name="predefined" type="xs:string"  use="optional"/>
+  </xs:complexType>
+
+  <!-- Automata: state + value(전이식) + default(폴백식) + remark(설명). -->
+  <xs:complexType name="AutomataType">
+    <xs:attribute name="state"   type="IntLiteral" use="required"/>
+    <xs:attribute name="value"   type="Expr"       use="required"/>
+    <xs:attribute name="default" type="Expr"       use="required"/>
+    <xs:attribute name="remark"  type="xs:string"  use="optional"/>
+  </xs:complexType>
+
+  <!-- Extra: 부가 동작. 현재 알려진 것은 Bksp(백스페이스 슬롯). -->
+  <xs:complexType name="ExtraType">
+    <xs:sequence>
+      <xs:element name="Bksp" type="BkspType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Bksp: key(슬롯 번호) + value1/value2(삭제 단위·플래그 식)
+       + condition1/condition2(판단 기준 식). 슬롯 식별을 위해 key 는 required. -->
+  <xs:complexType name="BkspType">
+    <xs:attribute name="key"        type="IntLiteral" use="required"/>
+    <xs:attribute name="value1"     type="Expr"       use="optional"/>
+    <xs:attribute name="value2"     type="Expr"       use="optional"/>
+    <xs:attribute name="condition1" type="Expr"       use="optional"/>
+    <xs:attribute name="condition2" type="Expr"       use="optional"/>
+  </xs:complexType>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       추가 표 (under-characterized; lax 모델링)
+       실제 .set/.ist 파일에 존재하나 관측 표본에서 대개 비어 있어 내부 구조가
+       충분히 드러나지 않았다. 자식 요소·속성을 관용 허용하고(xs:any/anyAttribute,
+       processContents=skip), 관측된 속성만 명시한다. 구조가 확인되면 좁힐 것.
+       ───────────────────────────────────────────────────────────────────── -->
+
+  <!-- KeyProgramTable: 글쇠 프로그램(매크로) 표. InputSchemeSetting 하위. -->
+  <xs:complexType name="KeyProgramTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- UnitAbbrTable: 낱자 약자(준말) 표. -->
+  <xs:complexType name="UnitAbbrTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- UnitSubstTable: 낱자 치환 표. -->
+  <xs:complexType name="UnitSubstTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- HanSubstTable: 한자/기호 변환(치환) 표. 관측 속성: numeric. -->
+  <xs:complexType name="HanSubstTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:attribute name="numeric" type="xs:string" use="optional"/>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- UserCandiTable: 사용자 후보(변환 후보) 표. -->
+  <xs:complexType name="UserCandiTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- UserCompoTable: 사용자 조합(낱말/상용구) 표. -->
+  <xs:complexType name="UserCompoTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- UserKeyTable: 사용자 글쇠 표. 관측 속성: doobeolchk. -->
+  <xs:complexType name="UserKeyTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:attribute name="doobeolchk" type="xs:string" use="optional"/>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- JackolanternTable: 특수 도깨비불 규칙 표. GeneratorSetting 하위. -->
+  <xs:complexType name="JackolanternTableType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" namespace="##any" processContents="skip"/>
+    </xs:sequence>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+</xs:schema>

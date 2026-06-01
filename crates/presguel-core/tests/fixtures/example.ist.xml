@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Clean-room 픽스처(유형 .ist): InputEntry 가 루트로 단독 저장된 형태. -->
+<InputEntry>
+  <InputSchemeSetting flag="0" object="CBasicInputScheme">
+    <KeyTable name="example-ist" from="33" to="126">
+      <Key at="0x41" value="P&amp;1 ? 'a' : 'A'"/>
+    </KeyTable>
+  </InputSchemeSetting>
+  <GeneratorSetting object="CIme"/>
+</InputEntry>
