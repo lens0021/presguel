@@ -132,6 +132,52 @@ pub struct AutomataState {
     pub default: Expr,
 }
 
+/// 백스페이스 한 번에 지우는 단위(날개셋 Bksp 수식값 0~3).
+/// 참고: `research/ngs-automata-help.txt` 의 Bksp 설명(cp_bkspset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BkspUnit {
+    /// 0: 직전에 입력된 한 타만 취소(겹낱자/토글 한 단계). 기존 기본 동작.
+    #[default]
+    LastKey,
+    /// 1: 최하위 낱자(종성→중성→초성 순)의 직전 한 타.
+    LowestLastKey,
+    /// 2: 최하위 낱자 전체(그 낱자를 몇 타에 넣었든 통째로).
+    LowestWhole,
+    /// 3: 글자 전체(한 타에 음절 통째).
+    Syllable,
+}
+
+/// 컴파일된 백스페이스 동작(한 Bksp 슬롯). 조합 중일 때(제1동작)와 그렇지 않을 때
+/// (제2동작, 앞의 완성 글자)에 각각 어느 단위로 지울지와, 글자를 다 지운 뒤 앞 한글에
+/// 달라붙어 재조합할지(BkspAttach)를 담는다.
+#[derive(Debug, Clone, Default)]
+pub struct BkspBehavior {
+    /// 조합 중 삭제 단위(제1동작, value1).
+    pub composing: BkspUnit,
+    /// 비조합 상태에서 앞 완성 글자 삭제 단위(제2동작, value2).
+    pub idle: BkspUnit,
+    /// 글자를 다 지운 뒤 앞 한글에 달라붙어 재조합(BkspAttach).
+    pub attach: bool,
+}
+
+/// Bksp value 문자열(예 `"ByUnitStep|BkspAttach"`, `"BySyllable"`, `"0"`)을 (단위, attach)로.
+/// 플래그명과 정수(0~3)를 인식한다. 알 수 없으면 기본(LastKey, attach 없음).
+fn parse_bksp_value(s: &str) -> (BkspUnit, bool) {
+    let mut unit = BkspUnit::LastKey;
+    let mut attach = false;
+    for tok in s.split('|') {
+        match tok.trim() {
+            "BkspAttach" => attach = true,
+            "ByUnitStep" | "0" => unit = BkspUnit::LastKey,
+            "1" => unit = BkspUnit::LowestLastKey,
+            "2" => unit = BkspUnit::LowestWhole,
+            "BySyllable" | "3" => unit = BkspUnit::Syllable,
+            _ => {}
+        }
+    }
+    (unit, attach)
+}
+
 /// 한 입력 항목을 엔진이 바로 쓰도록 컴파일한 배열.
 #[derive(Debug, Clone)]
 pub struct Layout {
@@ -150,6 +196,8 @@ pub struct Layout {
     pub automata: HashMap<i64, AutomataState>,
     /// 오토마타 시작 상태(AutomataTable 의 default 속성). 보통 0.
     pub automata_start: i64,
+    /// 백스페이스 동작(`<Bksp key="1">` 슬롯). 물리 Backspace 하나에 대응.
+    pub bksp: BkspBehavior,
 }
 
 impl Layout {
@@ -229,6 +277,23 @@ impl Config {
         }
         let automata_start = entry.automata_default.trim().parse().unwrap_or(0);
 
+        // 백스페이스: 물리 Backspace 하나이므로 key="1" 슬롯을 쓴다(없으면 기본).
+        // value1=조합 중(제1동작), value2=비조합(제2동작). attach 는 둘 중 하나라도 켜지면.
+        let bksp = entry
+            .bksp
+            .iter()
+            .find(|b| b.key == 1)
+            .map(|b| {
+                let (composing, a1) = parse_bksp_value(&b.value1);
+                let (idle, a2) = parse_bksp_value(&b.value2);
+                BkspBehavior {
+                    composing,
+                    idle,
+                    attach: a1 || a2,
+                }
+            })
+            .unwrap_or_default();
+
         Ok(Layout {
             name: entry
                 .key_table
@@ -242,6 +307,7 @@ impl Config {
             shortcuts: self.editor.shortcuts.clone(),
             automata,
             automata_start,
+            bksp,
         })
     }
 
@@ -589,5 +655,40 @@ mod tests {
             }),
             Ok(Value::Int(0))
         );
+    }
+
+    #[test]
+    fn compile_bksp_behavior() {
+        // Bksp key=1 value1=ByUnitStep|BkspAttach value2=BySyllable 컴파일 확인.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<EditContextSetting version="0x500">
+  <EditorLayer flag="0"><FinalConvTable/></EditorLayer>
+  <InputLayer default="0" current="0">
+    <InputEntry>
+      <InputSchemeSetting object="CBasicInputScheme">
+        <KeyTable name="t" flag="0" from="33" to="126"><Key at="0x6B" value="H3|G_"/></KeyTable>
+      </InputSchemeSetting>
+      <GeneratorSetting object="CNgsImeEx">
+        <UnitMixTable/><VirtualUnitTable/><AutomataTable default="0"/>
+        <Extra>
+          <Bksp key="1" value1="ByUnitStep|BkspAttach" value2="BySyllable" condition1="0" condition2="0"/>
+          <Bksp key="2" value1="0" value2="BySyllable" condition1="0" condition2="0"/>
+        </Extra>
+      </GeneratorSetting>
+    </InputEntry>
+  </InputLayer>
+</EditContextSetting>"#;
+        let layout = Config::parse(xml).unwrap().compile(0).unwrap();
+        assert_eq!(layout.bksp.composing, BkspUnit::LastKey); // ByUnitStep
+        assert_eq!(layout.bksp.idle, BkspUnit::Syllable); // BySyllable
+        assert!(layout.bksp.attach); // BkspAttach
+    }
+
+    #[test]
+    fn compile_bksp_default_when_absent() {
+        // Extra/Bksp 없으면 기본(LastKey, attach 없음).
+        let layout = Config::parse(MINI).unwrap().compile(0).unwrap();
+        assert_eq!(layout.bksp.composing, BkspUnit::LastKey);
+        assert!(!layout.bksp.attach);
     }
 }
