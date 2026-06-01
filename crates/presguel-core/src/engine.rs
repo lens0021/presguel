@@ -8,7 +8,7 @@
 //!
 //! 참고: `research/02-config-decode.md` §C, `research/04-hangul-unicode.md`.
 
-use crate::config::Layout;
+use crate::config::{BkspUnit, Layout};
 use crate::expr::{Ctx, Value};
 use crate::jamo;
 use crate::ngs_seq::ngs_seq;
@@ -524,10 +524,11 @@ impl Engine {
                 consumed: false,
             };
         }
-        self.history.pop();
+        // 조합 중이므로 제1동작(composing) 삭제 단위를 따른다.
+        self.bksp_remove(self.layout.bksp.composing);
+        // 남은 이력을 처음부터 재생해 현재 음절을 재구성(오토마타 상태도 초기화).
         let hist = std::mem::take(&mut self.history);
         self.cur = Syllable::default();
-        // 오토마타 상태도 처음부터 재생되도록 초기화(재생 중 automaton_feed 가 다시 쌓는다).
         self.auto_state = self.layout.automata_start;
         for u in hist {
             // 한 음절 안의 단위들이므로 재생 중 확정은 발생하지 않는다.
@@ -537,6 +538,47 @@ impl Engine {
             commit: String::new(),
             preedit: self.preedit(),
             consumed: true,
+        }
+    }
+
+    /// 백스페이스 삭제 단위에 따라 이력에서 제거할 단위를 정한다(현재 음절 기준).
+    /// 제거 후 호출부가 남은 이력을 재생해 음절을 재구성한다.
+    fn bksp_remove(&mut self, mode: BkspUnit) {
+        match mode {
+            // 글자 전체: 이력 비움 → 재생 시 빈 음절.
+            BkspUnit::Syllable => self.history.clear(),
+            // 직전 한 타: 마지막 단위 하나 제거.
+            BkspUnit::LastKey => {
+                self.history.pop();
+            }
+            // 최하위 낱자 관련: 종성→중성→초성 순으로 채워진 첫 칸을 대상으로.
+            BkspUnit::LowestLastKey | BkspUnit::LowestWhole => {
+                let cat = if self.cur.jong.is_some() {
+                    Category::Jong
+                } else if self.cur.jung.is_some() {
+                    Category::Jung
+                } else if self.cur.cho.is_some() {
+                    Category::Cho
+                } else {
+                    self.history.pop();
+                    return;
+                };
+                let layout = &self.layout;
+                if mode == BkspUnit::LowestWhole {
+                    // 그 낱자 전체: 해당 갈래 단위 모두 제거.
+                    self.history
+                        .retain(|u| Self::unit_cat(layout, u) != Some(cat));
+                } else {
+                    // 최하위 낱자의 직전 한 타: 그 갈래의 마지막 단위 하나만 제거.
+                    if let Some(p) = self
+                        .history
+                        .iter()
+                        .rposition(|u| Self::unit_cat(layout, u) == Some(cat))
+                    {
+                        self.history.remove(p);
+                    }
+                }
+            }
         }
     }
 }
@@ -859,5 +901,75 @@ mod tests {
         assert_eq!(e.preedit(), "과");
         let o = e.backspace();
         assert_eq!(o.preedit, "고");
+    }
+
+    // Bksp 삭제 단위 모드별 테스트. AutomataTable + Extra/Bksp 를 가진 세벌식 설정.
+    fn bksp_engine(value1: &str) -> Engine {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<EditContextSetting version="0x500">
+  <EditorLayer flag="0"><FinalConvTable/></EditorLayer>
+  <InputLayer default="0" current="0">
+    <InputEntry>
+      <InputSchemeSetting object="CBasicInputScheme">
+        <KeyTable name="b" flag="0" from="33" to="126">
+          <Key at="0x67" value="H3|G_"/><Key at="0x61" value="H3|A_"/>
+          <Key at="0x6D" value="H3|_N"/><Key at="0x73" value="H3|_S"/>
+        </KeyTable>
+      </InputSchemeSetting>
+      <GeneratorSetting object="CNgsImeEx">
+        <UnitMixTable><UnitMix unit="JONG" a="_N" b="_S" to="_NJ"/></UnitMixTable>
+        <VirtualUnitTable/>
+        <AutomataTable default="0">
+          <Automata state="0" value="1" default="0"/>
+          <Automata state="1" value="A||B||C ? (A||D)&amp;&amp;(B||E) ? 2 : 1 : -2" default="-1"/>
+          <Automata state="2" value="A&amp;&amp;A!=500 ? 0 : B||C||A==500 ? 2 : -2" default="0"/>
+        </AutomataTable>
+        <Extra><Bksp key="1" value1="{value1}" value2="BySyllable" condition1="0" condition2="0"/></Extra>
+      </GeneratorSetting>
+    </InputEntry>
+  </InputLayer>
+</EditContextSetting>"#
+        );
+        let cfg = Config::parse(&xml).unwrap();
+        Engine::new(cfg.compile(0).unwrap())
+    }
+
+    #[test]
+    fn bksp_mode_lastkey() {
+        // 직전 한 타: 간(ㄱㅏㄴ) → ㄴ 한 타만 → 가.
+        let mut e = bksp_engine("ByUnitStep");
+        typ(&mut e, "gam"); // 간
+        let o = e.backspace();
+        assert_eq!(o.preedit, "가");
+    }
+
+    #[test]
+    fn bksp_mode_syllable() {
+        // 글자 전체: 간 → 한 타에 통째 → 빈.
+        let mut e = bksp_engine("BySyllable");
+        typ(&mut e, "gam"); // 간
+        let o = e.backspace();
+        assert_eq!(o.preedit, "");
+    }
+
+    #[test]
+    fn bksp_mode_lowest_whole() {
+        // 최하위 낱자 전체: 갅(ㄱㅏ+겹받침ㄵ) → 종성 전체 제거 → 가.
+        let mut e = bksp_engine("2"); // LowestWhole
+        typ(&mut e, "gams"); // ㄱㅏ + ㄴ + ㅈ(겹받침 ㄵ)
+        assert_eq!(e.preedit(), "갅");
+        let o = e.backspace();
+        assert_eq!(o.preedit, "가"); // 종성 ㄵ 통째 제거
+    }
+
+    #[test]
+    fn bksp_mode_lowest_lastkey() {
+        // 최하위 낱자 직전 한 타: 갅 → 종성 마지막 한 타(ㅈ) → 간.
+        let mut e = bksp_engine("1"); // LowestLastKey
+        typ(&mut e, "gams"); // 갅
+        assert_eq!(e.preedit(), "갅");
+        let o = e.backspace();
+        assert_eq!(o.preedit, "간"); // ㄵ → ㄴ (한 단계)
     }
 }
